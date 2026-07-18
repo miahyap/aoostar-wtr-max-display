@@ -30,14 +30,14 @@ Then configure at *Settings → Utilities → AOOSTAR LCD*.
 The plugin installs fine from the `.plg` URL above and doesn't need
 [Community Applications](https://ca.unraid.net/submit) to work — CA is a
 discovery channel, not an install requirement. Listing it there is a
-possibility once the plugin has been validated on real hardware.
+possibility, not a current goal. The plugin and its panel are confirmed
+working on real WTR MAX hardware, so nothing technical blocks it.
 
 Requirements, if it's ever pursued: an OSI-approved license (satisfied — MIT),
 2FA on the GitHub account, a `ca_profile.xml` and a `plugins/*.xml` wrapper at
 the repo root whose `<PluginURL>` matches the plg's `pluginURL` exactly, and
-ideally an Unraid forum support topic. CA policy also discourages
-proof-of-concept submissions and holds plugins to a stricter bar than Docker
-apps, since plugins run as root — so hardware validation should come first.
+ideally an Unraid forum support topic. Note that CA holds plugins to a
+stricter bar than Docker apps, since plugins run as root.
 
 ## License
 

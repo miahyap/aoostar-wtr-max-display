@@ -115,16 +115,18 @@ of the vendor theme:
 sparkline generation against ramping traffic). Note: asterctl's sensor
 map never drops keys, so the collector rewrites every label each cycle
 (empty = render nothing) - relying on absent keys causes stale overlaps.
-Text positions may need on-device tweaking — edit
-`/boot/config/plugins/aoostar-lcd/cfg/monitor.json` and restart the
-driver (once customized, the plugin never overwrites it; delete it to
-return to stock).
+The panel has been confirmed rendering correctly on a real WTR MAX display
+— the `make_panel.py` coordinates are right as shipped, with no on-device
+tweaking needed. To customize anyway, edit
+`/boot/config/plugins/aoostar-lcd/cfg/monitor.json` and restart the driver
+(once customized, the plugin never overwrites it; delete it to return to
+stock). Prefer changing `make_panel.py` and regenerating for anything you
+want to keep — a hand-edited `monitor.json` is not the source of truth.
 
 ## Next steps (ideas)
 
 - **Multiple rotating panels** via `switchTime` in `monitor.json`
   (array usage, parity status, Docker containers...).
 - **Display off at night** via cron calling the rc script.
-- Validate on real WTR MAX hardware (on-display text positions are still
-  untested), then consider a Community Applications listing — see the
-  root README for what that would require.
+- Consider a Community Applications listing — see the root README for what
+  that would require.
