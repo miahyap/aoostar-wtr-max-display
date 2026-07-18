@@ -15,6 +15,7 @@ $alcd_defaults = [
   'CPU_TEMP_HOT'  => '85',
   'HDD_HOT'       => '45',
   'SSD_HOT'       => '60',
+  'GRAPH_MIN'     => '15',
 ];
 $alcd_flash_cfg = '/boot/config/plugins/aoostar-lcd/aoostar-lcd.cfg';
 $alcd_cfg = $alcd_defaults;
@@ -104,6 +105,9 @@ Network interface shown on the display:
   <option value="<?=htmlspecialchars($if)?>" <?=$alcd_cfg['NETIF']==$if?'selected':''?>><?=htmlspecialchars($if.($ip ? " ($ip)" : ''))?></option>
 <?endforeach;?>
   </select>
+
+Network graph time window (minutes):
+: <input type="number" name="GRAPH_MIN" min="1" max="1440" value="<?=htmlspecialchars($alcd_cfg['GRAPH_MIN'])?>">
 
 Sensor refresh interval (seconds):
 : <input type="number" name="REFRESH" min="1" max="60" value="<?=htmlspecialchars($alcd_cfg['REFRESH'])?>">

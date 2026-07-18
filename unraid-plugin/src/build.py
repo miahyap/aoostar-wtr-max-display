@@ -15,7 +15,7 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.07.18a'
+VERSION = '2026.07.18b'
 
 # (relative path in plugin-root, mode)
 PAYLOAD = [

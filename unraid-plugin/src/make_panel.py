@@ -89,7 +89,10 @@ def text(label, x, y, size, color, align='left', width=0, unit='',
 
 def slots(label, x, y, size, align='left', width=0, unit='', decimals=0,
           name=''):
-    """One text element per color slot; the collector fills exactly one."""
+    """One text element per color slot; the collector writes all three each
+    cycle with only one non-empty (units baked into the value), because
+    asterctl's sensor map never drops absent keys - empty overwrites are
+    what clears a stale slot."""
     return [
         text(f'{label}_g', x, y, size, GREEN, align, width, unit, decimals, f'{name} (ok)'),
         text(f'{label}_a', x, y, size, AMBER, align, width, unit, decimals, f'{name} (warn)'),
@@ -106,23 +109,28 @@ def make_monitor(path):
     sensors = []
     # --- CPU/GPU zone: utilizations side by side, shared die temp below ---
     sensors.append(text('lbl_cpu', cx + 16, cy + 12, 22, MUTED, name='zone header'))
-    sensors += slots('cpu_util', cx, cy + 48, 60, 'center', half, '%', 0, 'CPU utilization')
-    sensors += slots('gpu_util', cx + half, cy + 48, 60, 'center', half, '%', 0, 'GPU utilization')
+    sensors += slots('cpu_util', cx, cy + 48, 60, 'center', half, '', 0, 'CPU utilization')
+    sensors += slots('gpu_util', cx + half, cy + 48, 60, 'center', half, '', 0, 'GPU utilization')
     sensors.append(text('lbl_cpu_cap', cx, cy + 130, 16, MUTED, 'center', half, name='CPU caption'))
     sensors.append(text('lbl_gpu_cap', cx + half, cy + 130, 16, MUTED, 'center', half, name='GPU caption'))
-    sensors += slots('cpu_temp', cx, cy + 162, 62, 'center', cw, '°C', 0, 'die temperature')
+    sensors += slots('cpu_temp', cx, cy + 162, 62, 'center', cw, '', 0, 'die temperature')
     sensors.append(text('lbl_ram', cx + 16, cy + 250, 18, MUTED, name='RAM caption'))
-    sensors.append(text('mem_pct', cx + 70, cy + 250, 18, TEXT, unit='%', name='RAM usage'))
+    sensors.append(text('mem_pct', cx + 70, cy + 250, 18, TEXT, name='RAM usage'))
 
-    # --- NET zone ---
+    # --- NET zone: current speeds with history sparklines under each ---
     sensors.append(text('lbl_net', nx + 16, ny + 12, 22, MUTED, name='NET header'))
     sensors.append(text('DATE_h_m_3', nx, ny + 10, 26, MUTED, 'right', nw - 16, name='clock'))
-    sensors.append(text('lbl_up', nx + 20, ny + 62, 38, GREEN, name='upload arrow'))
-    sensors.append(text('net_up', nx + 70, ny + 54, 52, TEXT, 'right', nw - 90, decimals=1, name='upload speed'))
-    sensors.append(text('lbl_down', nx + 20, ny + 142, 38, BLUE, name='download arrow'))
-    sensors.append(text('net_down', nx + 70, ny + 134, 52, TEXT, 'right', nw - 90, decimals=1, name='download speed'))
-    sensors.append(text('lbl_ip', nx + 20, ny + 240, 18, MUTED, name='IP caption'))
-    sensors.append(text('net_ip', nx + 60, ny + 238, 20, TEXT, name='IP address'))
+    sensors.append(text('lbl_up', nx + 20, ny + 48, 32, GREEN, name='upload arrow'))
+    sensors.append(text('net_up', nx + 70, ny + 40, 44, TEXT, 'right', nw - 90, name='upload speed'))
+    sensors.append(text('net_up_graph', nx + 20, ny + 90, 26, GREEN, name='upload history'))
+    sensors.append(text('net_up_peak', nx, ny + 96, 15, MUTED, 'right', nw - 16, name='upload peak'))
+    sensors.append(text('lbl_down', nx + 20, ny + 134, 32, BLUE, name='download arrow'))
+    sensors.append(text('net_down', nx + 70, ny + 126, 44, TEXT, 'right', nw - 90, name='download speed'))
+    sensors.append(text('net_down_graph', nx + 20, ny + 176, 26, BLUE, name='download history'))
+    sensors.append(text('net_down_peak', nx, ny + 182, 15, MUTED, 'right', nw - 16, name='download peak'))
+    sensors.append(text('lbl_ip', nx + 20, ny + 238, 18, MUTED, name='IP caption'))
+    sensors.append(text('net_ip', nx + 60, ny + 236, 20, TEXT, name='IP address'))
+    sensors.append(text('lbl_window', nx, ny + 240, 16, MUTED, 'right', nw - 16, name='graph window caption'))
 
     # --- disk strip: exactly one of these is present at a time ---
     sensors.append(text('disk_ok', dx + 16, dy + 12, 20, GREEN, name='disk summary'))

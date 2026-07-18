@@ -33,6 +33,7 @@ CPU_TEMP_HOT="85"
 HDD_HOT="45"
 SSD_HOT="60"
 CPU_TEMP_SENSOR="auto"
+GRAPH_MIN="15"
 [ -f "$CFG" ] && . "$CFG"
 
 PIDFILE_SYS="/var/run/$PLUGIN-sysinfo.pid"
@@ -184,7 +185,7 @@ start() {
     echo $! > "$PIDFILE_SYS" )
 
   echo "Starting unraid-stats collector ..."
-  ( export RUNDIR NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT CPU_TEMP_SENSOR
+  ( export RUNDIR NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT CPU_TEMP_SENSOR GRAPH_MIN
     setsid /bin/bash "$STATS" </dev/null >>"$LOG_STATS" 2>&1 &
     echo $! > "$PIDFILE_STATS" )
 

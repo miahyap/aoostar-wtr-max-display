@@ -94,7 +94,9 @@ of the vendor theme:
   colored green/amber/red by configurable thresholds (colors work via
   triple label "slots" — `unraid-stats.sh` writes each value under exactly
   one of `_g`/`_a`/`_r` and asterctl skips labels with no value)
-- **Network** up/down speeds with dynamic units, IP address, and a clock
+- **Network** current up/down speeds, IP address, a clock, and per-direction
+  **history sparklines** (block-element graphs auto-scaled to the window
+  peak, window length configurable, default 15 min)
 - **RAM** usage
 - **Disk strip**: green max-temperature summary (HDD / SSD split, standby
   count); switches to a red alert listing any disk at/over its threshold.
@@ -102,7 +104,10 @@ of the vendor theme:
   never woken.
 
 `unraid-stats.sh` was tested against mock data in a Linux container
-(threshold colors, alert/summary switching, standby/flash handling).
+(threshold colors, alert/summary switching, standby/flash handling, and
+sparkline generation against ramping traffic). Note: asterctl's sensor
+map never drops keys, so the collector rewrites every label each cycle
+(empty = render nothing) - relying on absent keys causes stale overlaps.
 Text positions may need on-device tweaking — edit
 `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` and restart the
 driver (once customized, the plugin never overwrites it; delete it to
