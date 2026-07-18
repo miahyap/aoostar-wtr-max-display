@@ -14,7 +14,32 @@ software required.
 - **`WTR MAX+GEM12+ PRO Screen Software/`** — AOOSTAR's official software
   (git-ignored; see its README for download links).
 
-## Quick start
+## Install from the Unraid web UI (recommended)
+
+No SSH needed. In the Unraid web UI:
+
+1. Go to **Plugins → Install Plugin**.
+2. Paste this URL into the box and click **Install**:
+
+   ```
+   https://raw.githubusercontent.com/miahyap/aoostar-wtr-max-display/main/unraid-plugin/aoostar-lcd.plg
+   ```
+
+3. Wait for the install log to finish, then go to
+   **Settings → Utilities → AOOSTAR LCD** to configure and start it.
+
+The `.plg` is self-contained; on first start the plugin downloads the
+`asterctl` binary package from the
+[aoostar-rs releases](https://github.com/zehnm/aoostar-rs/releases), verifies
+its published checksum, and caches it on the flash drive so later reboots
+work offline. **Your server needs internet access for that first start** — if
+the download fails, the settings page will say so; copy a release tarball to
+`/boot/config/plugins/aoostar-lcd/packages/` by hand and click **Start**.
+
+Because the plg carries a `pluginURL`, Unraid's Plugins page will also show
+updates for it and can self-update from the same URL.
+
+## Quick start (SSH / fully offline)
 
 ```sh
 scp unraid-plugin/aoostar-lcd.plg root@<server>:/boot/config/plugins/
@@ -23,6 +48,7 @@ scp unraid-plugin/asterctl-*.tar.gz root@<server>:/boot/config/plugins/aoostar-l
 ssh root@<server> "plugin install /boot/config/plugins/aoostar-lcd.plg"
 ```
 
+Staging the tarball first means the install never needs to reach GitHub.
 Then configure at *Settings → Utilities → AOOSTAR LCD*.
 
 ## Community Applications (possible future)
