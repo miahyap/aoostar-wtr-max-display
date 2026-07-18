@@ -125,4 +125,6 @@ return to stock).
 - **Multiple rotating panels** via `switchTime` in `monitor.json`
   (array usage, parity status, Docker containers...).
 - **Display off at night** via cron calling the rc script.
-- Publish the plugin on GitHub + Community Applications.
+- Validate on real WTR MAX hardware (on-display text positions are still
+  untested), then consider a Community Applications listing — see the
+  root README for what that would require.
