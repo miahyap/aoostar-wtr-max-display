@@ -134,6 +134,12 @@ install_pkg() {
     return 1
   fi
   chmod +x "$APPDIR/asterctl" "$APPDIR/aster-sysinfo"
+  # the upstream tarball ships no license file, but MIT requires the notice
+  # to accompany the binaries - keep a copy beside them. $APPDIR is RAM and
+  # is repopulated here on every boot, so this must live with the extraction
+  # rather than in install.sh.
+  cp -f "/usr/local/emhttp/plugins/$PLUGIN/LICENSE-asterctl.txt" \
+        "$APPDIR/LICENSE-asterctl.txt" 2>/dev/null
   seed_cfg
 }
 

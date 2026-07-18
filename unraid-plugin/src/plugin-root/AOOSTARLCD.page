@@ -143,7 +143,7 @@ SSD/NVMe temperature alert threshold (&deg;C):
 * Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
 * Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).
 * Extra motherboard sensors (fan RPM etc.) need the it87 kernel driver: install **"IT87 Driver"** (by ich777) from the *Apps* tab.
-* Driver engine: open-source [aoostar-rs](https://github.com/zehnm/aoostar-rs) (`asterctl`), reverse-engineered — no vendor software required.
+* Driver engine: open-source [aoostar-rs](https://github.com/zehnm/aoostar-rs) (`asterctl`), reverse-engineered — no vendor software required. Licensed under MIT; the full text is installed alongside the binaries at `/usr/local/aoostar-lcd/LICENSE-asterctl.txt`. This plugin's own code is MIT too.
 
 **Recent log**
 

@@ -15,7 +15,15 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.07.18c'
+VERSION = '2026.07.18d'
+
+# MIT requires its notice to travel with every copy of the software, and the
+# upstream asterctl tarball ships no license file of its own - so the plugin
+# carries one and rc.aoostar-lcd drops it next to the extracted binaries.
+# Guarded here because an empty or truncated payload would silently ship a
+# non-compliant plugin: the .plg builds fine either way.
+ASTERCTL_LICENSE = 'LICENSE-asterctl.txt'
+ASTERCTL_LICENSE_MARKER = 'Permission is hereby granted, free of charge'
 
 # (relative path in plugin-root, mode)
 PAYLOAD = [
@@ -26,6 +34,7 @@ PAYLOAD = [
     ('sensor-mapping.template', '0644'),
     ('panel/monitor.json', '0644'),
     ('README.md', '0644'),
+    (ASTERCTL_LICENSE, '0644'),
 ]
 
 # binary payload files, embedded base64 (relative path, mode)
@@ -57,6 +66,10 @@ def main():
 
     install_sh = read(os.path.join(SRC, 'install.sh')).replace('@ICON_B64@', icon_b64)
     remove_sh = read(os.path.join(SRC, 'remove.sh'))
+
+    # refuse to ship a plugin whose third-party license notice went missing
+    if ASTERCTL_LICENSE_MARKER not in read(os.path.join(ROOT, ASTERCTL_LICENSE)):
+        sys.exit(f'{ASTERCTL_LICENSE} is missing the MIT grant - refusing to build')
 
     parts = []
     parts.append("<?xml version='1.0' standalone='yes'?>\n")
