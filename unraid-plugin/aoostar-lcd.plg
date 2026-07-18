@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "aoostar-lcd">
 <!ENTITY author    "miah.yap">
-<!ENTITY version   "2026.07.18d">
+<!ENTITY version   "2026.07.18e">
 ]>
 
-<PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" support="https://github.com/zehnm/aoostar-rs/discussions">
+<PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" pluginURL="https://raw.githubusercontent.com/miahyap/aoostar-wtr-max-display/main/unraid-plugin/aoostar-lcd.plg" support="https://github.com/miahyap/aoostar-wtr-max-display/issues">
 
 <CHANGES>
-###2026.07.18d
+###2026.07.18e
 - Initial release: drive the AOOSTAR WTR MAX / GEM12+ PRO integrated
   display on Unraid using the open-source aoostar-rs driver (asterctl +
   aster-sysinfo). Includes settings page, sensor mapping generation and
