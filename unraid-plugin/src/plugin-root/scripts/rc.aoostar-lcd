@@ -1,0 +1,335 @@
+#!/bin/bash
+# rc.aoostar-lcd - control script for the AOOSTAR WTR MAX / GEM12+ PRO
+# integrated display driver on Unraid.
+#
+# Usage: rc.aoostar-lcd start|stop|restart|status|install|sensors|on|off|apply
+#
+# Two daemons from the open-source aoostar-rs project (MIT/Apache-2.0):
+#   aster-sysinfo  - collects system sensor values into a text file (tmpfs)
+#   asterctl       - renders the sensor panel and drives the LCD over USB
+#                    serial (USB UART 0416:90a1)
+#
+# Binaries live in RAM (/usr/local/aoostar-lcd), panel configuration
+# persists on the flash drive. Nothing touches /mnt, so the service is
+# independent of the array state.
+
+PLUGIN="aoostar-lcd"
+FLASH="/boot/config/plugins/$PLUGIN"
+CFG="$FLASH/$PLUGIN.cfg"
+APPDIR="/usr/local/aoostar-lcd"
+CFGDIR="$FLASH/cfg"
+RUNDIR="/run/aoostar-lcd"
+LOGDIR="/var/log/aoostar-lcd"
+GITHUB_RELEASE="https://api.github.com/repos/zehnm/aoostar-rs/releases/tags/latest"
+
+# defaults (overridden by settings saved from the plugin page)
+SERVICE="enabled"
+NETIF="br0"
+REFRESH="3"
+DISKREFRESH="1800"
+SMARTCTL="no"
+CPU_TEMP_WARN="70"
+CPU_TEMP_HOT="85"
+HDD_HOT="45"
+SSD_HOT="60"
+CPU_TEMP_SENSOR="auto"
+GRAPH_MIN="15"
+[ -f "$CFG" ] && . "$CFG"
+
+PIDFILE_SYS="/var/run/$PLUGIN-sysinfo.pid"
+PIDFILE_CTL="/var/run/$PLUGIN-asterctl.pid"
+PIDFILE_STATS="/var/run/$PLUGIN-stats.pid"
+LOG_SYS="$LOGDIR/aster-sysinfo.log"
+LOG_CTL="$LOGDIR/asterctl.log"
+LOG_STATS="$LOGDIR/unraid-stats.log"
+STATS="/usr/local/emhttp/plugins/$PLUGIN/scripts/unraid-stats.sh"
+
+pid_running() {
+  local pid
+  pid=$(cat "$1" 2>/dev/null)
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+proc_running() {
+  # $1 = full command pattern to match
+  pgrep -f "$1" >/dev/null 2>&1
+}
+
+running() {
+  proc_running "$APPDIR/asterctl" || proc_running "$APPDIR/aster-sysinfo" || proc_running "$STATS"
+}
+
+rotate_log() {
+  [ -f "$1" ] && [ "$(stat -c %s "$1" 2>/dev/null || echo 0)" -gt 2097152 ] && mv -f "$1" "$1.old"
+}
+
+daemonize() {
+  # daemonize <pidfile> <logfile> <command...>
+  # Detach stdio AND close every other inherited fd: when started from the
+  # webgui (update.php / exec.php / plugin install), the caller's fd set
+  # includes the web server's client socket - if the daemon keeps it open,
+  # the browser request never completes (endless spinner).
+  local pidfile="$1" logfile="$2" fd
+  shift 2
+  (
+    exec </dev/null >>"$logfile" 2>&1
+    for fd in /proc/self/fd/*; do
+      fd=${fd##*/}
+      [ "$fd" -gt 2 ] 2>/dev/null && eval "exec ${fd}>&-" 2>/dev/null
+    done
+    exec setsid "$@"
+  ) &
+  echo $! > "$pidfile"
+}
+
+install_pkg() {
+  if [ -x "$APPDIR/asterctl" ] && [ -x "$APPDIR/aster-sysinfo" ]; then
+    seed_cfg
+    return 0
+  fi
+  mkdir -p "$FLASH/packages"
+  local tarball
+  tarball=$(ls -t "$FLASH"/packages/asterctl-*.tar.gz 2>/dev/null | head -1)
+  if [ -z "$tarball" ]; then
+    echo "No cached asterctl package found - downloading from GitHub ..."
+    local url
+    url=$(curl -s --max-time 30 "$GITHUB_RELEASE" \
+          | grep -o '"browser_download_url": *"[^"]*Linux-x64[^"]*\.tar\.gz"' \
+          | head -1 | cut -d'"' -f4)
+    if [ -z "$url" ]; then
+      echo "Error: could not determine download URL (no network?)."
+      echo "Offline alternative: copy an asterctl release tarball to $FLASH/packages/"
+      echo "from https://github.com/zehnm/aoostar-rs/releases"
+      return 1
+    fi
+    local fname="${url##*/}"
+    echo "Downloading $fname ..."
+    if ! curl -sL --max-time 120 -o "$FLASH/packages/$fname" "$url"; then
+      echo "Error: download failed."
+      rm -f "$FLASH/packages/$fname"
+      return 1
+    fi
+    # verify checksum published alongside the release (best effort)
+    local hashurl="${url%/*}/asterctl.hash"
+    if curl -sL --max-time 30 -o "$RUNDIR/asterctl.hash" "$hashurl" 2>/dev/null \
+       && grep -q "$fname" "$RUNDIR/asterctl.hash"; then
+      local want have
+      want=$(grep "$fname" "$RUNDIR/asterctl.hash" | awk '{print $2}')
+      have=$(sha256sum "$FLASH/packages/$fname" | awk '{print $1}')
+      if [ "$want" != "$have" ]; then
+        echo "Error: checksum mismatch for $fname - aborting."
+        rm -f "$FLASH/packages/$fname"
+        return 1
+      fi
+      echo "Checksum verified."
+    else
+      echo "Warning: could not verify checksum (hash file unavailable)."
+    fi
+    tarball="$FLASH/packages/$fname"
+  fi
+  echo "Installing $(basename "$tarball") to $APPDIR ..."
+  mkdir -p "$APPDIR"
+  if ! tar xzf "$tarball" -C "$APPDIR"; then
+    echo "Error: extraction failed."
+    return 1
+  fi
+  chmod +x "$APPDIR/asterctl" "$APPDIR/aster-sysinfo"
+  seed_cfg
+}
+
+seed_cfg() {
+  # install the plugin's "Unraid Dark" panel into persistent flash storage.
+  # The panel is (re)seeded when monitor.json is missing, still matches the
+  # last seeded version (sha in .seeded), or is the untouched aoostar-rs
+  # default - a user-customized panel is never overwritten.
+  local panelsrc="/usr/local/emhttp/plugins/$PLUGIN/panel"
+  mkdir -p "$CFGDIR"
+  local seed="no" cur=""
+  if [ ! -f "$CFGDIR/monitor.json" ]; then
+    seed="yes"
+  else
+    cur=$(sha256sum "$CFGDIR/monitor.json" | awk '{print $1}')
+    if [ -f "$CFGDIR/.seeded" ] && [ "$cur" = "$(cat "$CFGDIR/.seeded")" ]; then
+      seed="yes"
+    elif [ -f "$APPDIR/cfg/monitor.json" ] && cmp -s "$CFGDIR/monitor.json" "$APPDIR/cfg/monitor.json"; then
+      seed="yes"
+    fi
+  fi
+  if [ "$seed" = "yes" ] && [ -f "$panelsrc/monitor.json" ]; then
+    if [ -z "$cur" ] || ! cmp -s "$panelsrc/monitor.json" "$CFGDIR/monitor.json"; then
+      echo "Seeding Unraid Dark panel to $CFGDIR ..."
+    fi
+    cp "$panelsrc/monitor.json" "$panelsrc/unraid-dark.png" "$CFGDIR"/
+    sha256sum "$CFGDIR/monitor.json" | awk '{print $1}' > "$CFGDIR/.seeded"
+  fi
+}
+
+write_mapping() {
+  # generate the sensor mapping unless the user manages it manually
+  # (they opt out by removing the AUTO-GENERATED marker line)
+  local map="$CFGDIR/sensor-mapping.cfg"
+  local tpl="/usr/local/emhttp/plugins/$PLUGIN/sensor-mapping.template"
+  if [ -f "$map" ] && ! grep -q '^# AUTO-GENERATED' "$map"; then
+    return 0
+  fi
+  [ -f "$tpl" ] || return 0
+  sed "s/@NETIF@/$NETIF/g" "$tpl" > "$map"
+}
+
+start() {
+  if [ "$SERVICE" != "enabled" ]; then
+    echo "aoostar-lcd service is disabled in the plugin settings - not starting."
+    return 0
+  fi
+  if running; then
+    echo "aoostar-lcd is already running."
+    return 0
+  fi
+  mkdir -p "$RUNDIR/sensors" "$LOGDIR"
+  install_pkg || return 1
+  write_mapping
+  rotate_log "$LOG_SYS"
+  rotate_log "$LOG_CTL"
+  rotate_log "$LOG_STATS"
+
+  if ! lsusb 2>/dev/null | grep -qi "0416:90a1"; then
+    echo "Warning: LCD USB device 0416:90a1 not detected - asterctl may fail."
+  fi
+
+  cd "$APPDIR" || return 1
+  export RUNDIR NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT CPU_TEMP_SENSOR GRAPH_MIN
+
+  echo "Starting aster-sysinfo ..."
+  local sysargs=(--out "$RUNDIR/sensors/sysinfo.txt" --temp-dir "$RUNDIR" --refresh "$REFRESH")
+  [ "${DISKREFRESH:-0}" -gt 0 ] 2>/dev/null && sysargs+=(--disk-refresh "$DISKREFRESH")
+  [ "$SMARTCTL" = "yes" ] && sysargs+=(--smartctl)
+  daemonize "$PIDFILE_SYS" "$LOG_SYS" "$APPDIR/aster-sysinfo" "${sysargs[@]}"
+
+  echo "Starting unraid-stats collector ..."
+  daemonize "$PIDFILE_STATS" "$LOG_STATS" /bin/bash "$STATS"
+
+  # give the collectors a moment to write the first sensor files
+  sleep 2
+
+  echo "Starting asterctl ..."
+  daemonize "$PIDFILE_CTL" "$LOG_CTL" "$APPDIR/asterctl" \
+      --config monitor.json \
+      --config-dir "$CFGDIR" \
+      --sensor-path "$RUNDIR/sensors" \
+      --sensor-mapping sensor-mapping.cfg
+
+  sleep 3
+  if proc_running "$APPDIR/asterctl"; then
+    echo "aoostar-lcd started - the display should now show the sensor panel."
+  else
+    echo "Error: asterctl exited. Last log lines:"
+    tail -n 10 "$LOG_CTL" 2>/dev/null
+    stop_proc "$APPDIR/aster-sysinfo" "$PIDFILE_SYS"
+    stop_proc "$STATS" "$PIDFILE_STATS"
+    return 1
+  fi
+}
+
+stop_proc() {
+  # $1 = full command pattern, $2 = pidfile
+  local pattern="$1" pidfile="$2" pid i
+  proc_running "$pattern" || { rm -f "$pidfile"; return 0; }
+  pid=$(cat "$pidfile" 2>/dev/null)
+  if [ -n "$pid" ]; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  fi
+  pkill -TERM -f "$pattern" 2>/dev/null
+  for i in 1 2 3 4 5; do
+    proc_running "$pattern" || break
+    sleep 1
+  done
+  if proc_running "$pattern"; then
+    pkill -KILL -f "$pattern" 2>/dev/null
+    sleep 1
+  fi
+  rm -f "$pidfile"
+}
+
+stop() {
+  echo "Stopping aoostar-lcd ..."
+  stop_proc "$APPDIR/asterctl" "$PIDFILE_CTL"
+  stop_proc "$STATS" "$PIDFILE_STATS"
+  stop_proc "$APPDIR/aster-sysinfo" "$PIDFILE_SYS"
+  echo "aoostar-lcd stopped."
+}
+
+status() {
+  local ok=1
+  if proc_running "$APPDIR/aster-sysinfo"; then
+    echo "aster-sysinfo: running (pid $(pgrep -f "$APPDIR/aster-sysinfo" | head -1))"
+  else
+    echo "aster-sysinfo: stopped"
+  fi
+  if proc_running "$STATS"; then
+    echo "unraid-stats: running (pid $(pgrep -f "$STATS" | head -1))"
+  else
+    echo "unraid-stats: stopped"
+  fi
+  if proc_running "$APPDIR/asterctl"; then
+    echo "asterctl: running (pid $(pgrep -f "$APPDIR/asterctl" | head -1))"
+    ok=0
+  else
+    echo "asterctl: stopped"
+  fi
+  if lsusb 2>/dev/null | grep -qi "0416:90a1"; then
+    echo "LCD USB device (0416:90a1): detected"
+  else
+    echo "LCD USB device (0416:90a1): NOT detected"
+  fi
+  return $ok
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart)
+    stop
+    start
+    ;;
+  status)
+    status
+    ;;
+  install)
+    mkdir -p "$RUNDIR"
+    install_pkg
+    ;;
+  sensors)
+    # one-shot dump of all available sensor values (for mapping customization)
+    if [ ! -x "$APPDIR/aster-sysinfo" ]; then
+      echo "asterctl package not installed yet - click Start first."
+      exit 1
+    fi
+    "$APPDIR/aster-sysinfo" --console 2>/dev/null
+    ;;
+  on|off)
+    # direct display power control - only possible while asterctl is not
+    # holding the serial port
+    if proc_running "$APPDIR/asterctl"; then
+      echo "Stop the service first: asterctl is using the serial port."
+      exit 1
+    fi
+    if [ ! -x "$APPDIR/asterctl" ]; then
+      echo "asterctl package not installed yet - click Start first."
+      exit 1
+    fi
+    ( cd "$APPDIR" && "$APPDIR/asterctl" "--$1" 2>&1 )
+    ;;
+  apply)
+    # called after settings are saved
+    stop
+    [ "$SERVICE" = "enabled" ] && start
+    ;;
+  *)
+    echo "Usage: $0 start|stop|restart|status|install|sensors|on|off|apply"
+    exit 1
+    ;;
+esac

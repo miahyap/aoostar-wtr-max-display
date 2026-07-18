@@ -1,0 +1,1827 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "aoostar-lcd">
+<!ENTITY author    "miah.yap">
+<!ENTITY version   "2026.07.18c">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" support="https://github.com/zehnm/aoostar-rs/discussions">
+
+<CHANGES>
+###2026.07.18c
+- Initial release: drive the AOOSTAR WTR MAX / GEM12+ PRO integrated
+  display on Unraid using the open-source aoostar-rs driver (asterctl +
+  aster-sysinfo). Includes settings page, sensor mapping generation and
+  boot-time autostart.
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd" Mode="0755">
+<SHA256>e72e044fb2169852a898f59b0c589e6979423457dd9075cb883d46bfa764abd7</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# rc.aoostar-lcd - control script for the AOOSTAR WTR MAX / GEM12+ PRO
+# integrated display driver on Unraid.
+#
+# Usage: rc.aoostar-lcd start|stop|restart|status|install|sensors|on|off|apply
+#
+# Two daemons from the open-source aoostar-rs project (MIT/Apache-2.0):
+#   aster-sysinfo  - collects system sensor values into a text file (tmpfs)
+#   asterctl       - renders the sensor panel and drives the LCD over USB
+#                    serial (USB UART 0416:90a1)
+#
+# Binaries live in RAM (/usr/local/aoostar-lcd), panel configuration
+# persists on the flash drive. Nothing touches /mnt, so the service is
+# independent of the array state.
+
+PLUGIN="aoostar-lcd"
+FLASH="/boot/config/plugins/$PLUGIN"
+CFG="$FLASH/$PLUGIN.cfg"
+APPDIR="/usr/local/aoostar-lcd"
+CFGDIR="$FLASH/cfg"
+RUNDIR="/run/aoostar-lcd"
+LOGDIR="/var/log/aoostar-lcd"
+GITHUB_RELEASE="https://api.github.com/repos/zehnm/aoostar-rs/releases/tags/latest"
+
+# defaults (overridden by settings saved from the plugin page)
+SERVICE="enabled"
+NETIF="br0"
+REFRESH="3"
+DISKREFRESH="1800"
+SMARTCTL="no"
+CPU_TEMP_WARN="70"
+CPU_TEMP_HOT="85"
+HDD_HOT="45"
+SSD_HOT="60"
+CPU_TEMP_SENSOR="auto"
+GRAPH_MIN="15"
+[ -f "$CFG" ] && . "$CFG"
+
+PIDFILE_SYS="/var/run/$PLUGIN-sysinfo.pid"
+PIDFILE_CTL="/var/run/$PLUGIN-asterctl.pid"
+PIDFILE_STATS="/var/run/$PLUGIN-stats.pid"
+LOG_SYS="$LOGDIR/aster-sysinfo.log"
+LOG_CTL="$LOGDIR/asterctl.log"
+LOG_STATS="$LOGDIR/unraid-stats.log"
+STATS="/usr/local/emhttp/plugins/$PLUGIN/scripts/unraid-stats.sh"
+
+pid_running() {
+  local pid
+  pid=$(cat "$1" 2>/dev/null)
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+proc_running() {
+  # $1 = full command pattern to match
+  pgrep -f "$1" >/dev/null 2>&1
+}
+
+running() {
+  proc_running "$APPDIR/asterctl" || proc_running "$APPDIR/aster-sysinfo" || proc_running "$STATS"
+}
+
+rotate_log() {
+  [ -f "$1" ] && [ "$(stat -c %s "$1" 2>/dev/null || echo 0)" -gt 2097152 ] && mv -f "$1" "$1.old"
+}
+
+daemonize() {
+  # daemonize <pidfile> <logfile> <command...>
+  # Detach stdio AND close every other inherited fd: when started from the
+  # webgui (update.php / exec.php / plugin install), the caller's fd set
+  # includes the web server's client socket - if the daemon keeps it open,
+  # the browser request never completes (endless spinner).
+  local pidfile="$1" logfile="$2" fd
+  shift 2
+  (
+    exec </dev/null >>"$logfile" 2>&1
+    for fd in /proc/self/fd/*; do
+      fd=${fd##*/}
+      [ "$fd" -gt 2 ] 2>/dev/null && eval "exec ${fd}>&-" 2>/dev/null
+    done
+    exec setsid "$@"
+  ) &
+  echo $! > "$pidfile"
+}
+
+install_pkg() {
+  if [ -x "$APPDIR/asterctl" ] && [ -x "$APPDIR/aster-sysinfo" ]; then
+    seed_cfg
+    return 0
+  fi
+  mkdir -p "$FLASH/packages"
+  local tarball
+  tarball=$(ls -t "$FLASH"/packages/asterctl-*.tar.gz 2>/dev/null | head -1)
+  if [ -z "$tarball" ]; then
+    echo "No cached asterctl package found - downloading from GitHub ..."
+    local url
+    url=$(curl -s --max-time 30 "$GITHUB_RELEASE" \
+          | grep -o '"browser_download_url": *"[^"]*Linux-x64[^"]*\.tar\.gz"' \
+          | head -1 | cut -d'"' -f4)
+    if [ -z "$url" ]; then
+      echo "Error: could not determine download URL (no network?)."
+      echo "Offline alternative: copy an asterctl release tarball to $FLASH/packages/"
+      echo "from https://github.com/zehnm/aoostar-rs/releases"
+      return 1
+    fi
+    local fname="${url##*/}"
+    echo "Downloading $fname ..."
+    if ! curl -sL --max-time 120 -o "$FLASH/packages/$fname" "$url"; then
+      echo "Error: download failed."
+      rm -f "$FLASH/packages/$fname"
+      return 1
+    fi
+    # verify checksum published alongside the release (best effort)
+    local hashurl="${url%/*}/asterctl.hash"
+    if curl -sL --max-time 30 -o "$RUNDIR/asterctl.hash" "$hashurl" 2>/dev/null \
+       && grep -q "$fname" "$RUNDIR/asterctl.hash"; then
+      local want have
+      want=$(grep "$fname" "$RUNDIR/asterctl.hash" | awk '{print $2}')
+      have=$(sha256sum "$FLASH/packages/$fname" | awk '{print $1}')
+      if [ "$want" != "$have" ]; then
+        echo "Error: checksum mismatch for $fname - aborting."
+        rm -f "$FLASH/packages/$fname"
+        return 1
+      fi
+      echo "Checksum verified."
+    else
+      echo "Warning: could not verify checksum (hash file unavailable)."
+    fi
+    tarball="$FLASH/packages/$fname"
+  fi
+  echo "Installing $(basename "$tarball") to $APPDIR ..."
+  mkdir -p "$APPDIR"
+  if ! tar xzf "$tarball" -C "$APPDIR"; then
+    echo "Error: extraction failed."
+    return 1
+  fi
+  chmod +x "$APPDIR/asterctl" "$APPDIR/aster-sysinfo"
+  seed_cfg
+}
+
+seed_cfg() {
+  # install the plugin's "Unraid Dark" panel into persistent flash storage.
+  # The panel is (re)seeded when monitor.json is missing, still matches the
+  # last seeded version (sha in .seeded), or is the untouched aoostar-rs
+  # default - a user-customized panel is never overwritten.
+  local panelsrc="/usr/local/emhttp/plugins/$PLUGIN/panel"
+  mkdir -p "$CFGDIR"
+  local seed="no" cur=""
+  if [ ! -f "$CFGDIR/monitor.json" ]; then
+    seed="yes"
+  else
+    cur=$(sha256sum "$CFGDIR/monitor.json" | awk '{print $1}')
+    if [ -f "$CFGDIR/.seeded" ] && [ "$cur" = "$(cat "$CFGDIR/.seeded")" ]; then
+      seed="yes"
+    elif [ -f "$APPDIR/cfg/monitor.json" ] && cmp -s "$CFGDIR/monitor.json" "$APPDIR/cfg/monitor.json"; then
+      seed="yes"
+    fi
+  fi
+  if [ "$seed" = "yes" ] && [ -f "$panelsrc/monitor.json" ]; then
+    if [ -z "$cur" ] || ! cmp -s "$panelsrc/monitor.json" "$CFGDIR/monitor.json"; then
+      echo "Seeding Unraid Dark panel to $CFGDIR ..."
+    fi
+    cp "$panelsrc/monitor.json" "$panelsrc/unraid-dark.png" "$CFGDIR"/
+    sha256sum "$CFGDIR/monitor.json" | awk '{print $1}' > "$CFGDIR/.seeded"
+  fi
+}
+
+write_mapping() {
+  # generate the sensor mapping unless the user manages it manually
+  # (they opt out by removing the AUTO-GENERATED marker line)
+  local map="$CFGDIR/sensor-mapping.cfg"
+  local tpl="/usr/local/emhttp/plugins/$PLUGIN/sensor-mapping.template"
+  if [ -f "$map" ] && ! grep -q '^# AUTO-GENERATED' "$map"; then
+    return 0
+  fi
+  [ -f "$tpl" ] || return 0
+  sed "s/@NETIF@/$NETIF/g" "$tpl" > "$map"
+}
+
+start() {
+  if [ "$SERVICE" != "enabled" ]; then
+    echo "aoostar-lcd service is disabled in the plugin settings - not starting."
+    return 0
+  fi
+  if running; then
+    echo "aoostar-lcd is already running."
+    return 0
+  fi
+  mkdir -p "$RUNDIR/sensors" "$LOGDIR"
+  install_pkg || return 1
+  write_mapping
+  rotate_log "$LOG_SYS"
+  rotate_log "$LOG_CTL"
+  rotate_log "$LOG_STATS"
+
+  if ! lsusb 2>/dev/null | grep -qi "0416:90a1"; then
+    echo "Warning: LCD USB device 0416:90a1 not detected - asterctl may fail."
+  fi
+
+  cd "$APPDIR" || return 1
+  export RUNDIR NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT CPU_TEMP_SENSOR GRAPH_MIN
+
+  echo "Starting aster-sysinfo ..."
+  local sysargs=(--out "$RUNDIR/sensors/sysinfo.txt" --temp-dir "$RUNDIR" --refresh "$REFRESH")
+  [ "${DISKREFRESH:-0}" -gt 0 ] 2>/dev/null && sysargs+=(--disk-refresh "$DISKREFRESH")
+  [ "$SMARTCTL" = "yes" ] && sysargs+=(--smartctl)
+  daemonize "$PIDFILE_SYS" "$LOG_SYS" "$APPDIR/aster-sysinfo" "${sysargs[@]}"
+
+  echo "Starting unraid-stats collector ..."
+  daemonize "$PIDFILE_STATS" "$LOG_STATS" /bin/bash "$STATS"
+
+  # give the collectors a moment to write the first sensor files
+  sleep 2
+
+  echo "Starting asterctl ..."
+  daemonize "$PIDFILE_CTL" "$LOG_CTL" "$APPDIR/asterctl" \
+      --config monitor.json \
+      --config-dir "$CFGDIR" \
+      --sensor-path "$RUNDIR/sensors" \
+      --sensor-mapping sensor-mapping.cfg
+
+  sleep 3
+  if proc_running "$APPDIR/asterctl"; then
+    echo "aoostar-lcd started - the display should now show the sensor panel."
+  else
+    echo "Error: asterctl exited. Last log lines:"
+    tail -n 10 "$LOG_CTL" 2>/dev/null
+    stop_proc "$APPDIR/aster-sysinfo" "$PIDFILE_SYS"
+    stop_proc "$STATS" "$PIDFILE_STATS"
+    return 1
+  fi
+}
+
+stop_proc() {
+  # $1 = full command pattern, $2 = pidfile
+  local pattern="$1" pidfile="$2" pid i
+  proc_running "$pattern" || { rm -f "$pidfile"; return 0; }
+  pid=$(cat "$pidfile" 2>/dev/null)
+  if [ -n "$pid" ]; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  fi
+  pkill -TERM -f "$pattern" 2>/dev/null
+  for i in 1 2 3 4 5; do
+    proc_running "$pattern" || break
+    sleep 1
+  done
+  if proc_running "$pattern"; then
+    pkill -KILL -f "$pattern" 2>/dev/null
+    sleep 1
+  fi
+  rm -f "$pidfile"
+}
+
+stop() {
+  echo "Stopping aoostar-lcd ..."
+  stop_proc "$APPDIR/asterctl" "$PIDFILE_CTL"
+  stop_proc "$STATS" "$PIDFILE_STATS"
+  stop_proc "$APPDIR/aster-sysinfo" "$PIDFILE_SYS"
+  echo "aoostar-lcd stopped."
+}
+
+status() {
+  local ok=1
+  if proc_running "$APPDIR/aster-sysinfo"; then
+    echo "aster-sysinfo: running (pid $(pgrep -f "$APPDIR/aster-sysinfo" | head -1))"
+  else
+    echo "aster-sysinfo: stopped"
+  fi
+  if proc_running "$STATS"; then
+    echo "unraid-stats: running (pid $(pgrep -f "$STATS" | head -1))"
+  else
+    echo "unraid-stats: stopped"
+  fi
+  if proc_running "$APPDIR/asterctl"; then
+    echo "asterctl: running (pid $(pgrep -f "$APPDIR/asterctl" | head -1))"
+    ok=0
+  else
+    echo "asterctl: stopped"
+  fi
+  if lsusb 2>/dev/null | grep -qi "0416:90a1"; then
+    echo "LCD USB device (0416:90a1): detected"
+  else
+    echo "LCD USB device (0416:90a1): NOT detected"
+  fi
+  return $ok
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart)
+    stop
+    start
+    ;;
+  status)
+    status
+    ;;
+  install)
+    mkdir -p "$RUNDIR"
+    install_pkg
+    ;;
+  sensors)
+    # one-shot dump of all available sensor values (for mapping customization)
+    if [ ! -x "$APPDIR/aster-sysinfo" ]; then
+      echo "asterctl package not installed yet - click Start first."
+      exit 1
+    fi
+    "$APPDIR/aster-sysinfo" --console 2>/dev/null
+    ;;
+  on|off)
+    # direct display power control - only possible while asterctl is not
+    # holding the serial port
+    if proc_running "$APPDIR/asterctl"; then
+      echo "Stop the service first: asterctl is using the serial port."
+      exit 1
+    fi
+    if [ ! -x "$APPDIR/asterctl" ]; then
+      echo "asterctl package not installed yet - click Start first."
+      exit 1
+    fi
+    ( cd "$APPDIR" && "$APPDIR/asterctl" "--$1" 2>&1 )
+    ;;
+  apply)
+    # called after settings are saved
+    stop
+    [ "$SERVICE" = "enabled" ] && start
+    ;;
+  *)
+    echo "Usage: $0 start|stop|restart|status|install|sensors|on|off|apply"
+    exit 1
+    ;;
+esac
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/scripts/unraid-stats.sh" Mode="0755">
+<SHA256>a6e3c4294b00e1ff5ae35e9092bd6ca023ce9bbd85db22df3f5de276efd94597</SHA256>
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# unraid-stats.sh - Unraid-specific sensor collector for the aoostar-lcd
+# "Unraid Dark" panel.
+#
+# Reads aster-sysinfo's output plus Unraid's own disk state
+# (/var/local/emhttp/disks.ini - temperatures cached by emhttp, so spun-down
+# disks are NEVER woken) and writes panel-ready values to
+# $RUNDIR/sensors/unraid.txt (atomic rename).
+#
+# Dynamic colors: each colored value has three label "slots" (_g/_a/_r);
+# every slot is (re)written each cycle with only one non-empty - empty
+# values render nothing, and overwriting is required because asterctl's
+# sensor map never removes keys that disappear from the file.
+#
+# Network history: keeps a ring buffer of up/down speeds over GRAPH_MIN
+# minutes and renders block-element sparklines (auto-scaled to the window
+# peak) as text sensors.
+#
+# Configuration comes from the environment (set by rc.aoostar-lcd):
+#   NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT
+#   CPU_TEMP_SENSOR GRAPH_MIN
+
+RUNDIR="${RUNDIR:-/run/aoostar-lcd}"
+SYSINFO="$RUNDIR/sensors/sysinfo.txt"
+OUT="$RUNDIR/sensors/unraid.txt"
+TMP="$RUNDIR/.unraid.txt.tmp"
+DISKS_INI="${DISKS_INI:-/var/local/emhttp/disks.ini}"
+
+NETIF="${NETIF:-br0}"
+REFRESH="${REFRESH:-3}"
+CPU_TEMP_WARN="${CPU_TEMP_WARN:-70}"
+CPU_TEMP_HOT="${CPU_TEMP_HOT:-85}"
+UTIL_WARN="${UTIL_WARN:-70}"
+UTIL_HOT="${UTIL_HOT:-90}"
+HDD_HOT="${HDD_HOT:-45}"
+SSD_HOT="${SSD_HOT:-60}"
+CPU_TEMP_SENSOR="${CPU_TEMP_SENSOR:-auto}"
+GRAPH_MIN="${GRAPH_MIN:-15}"
+
+GRAPH_BUCKETS=26
+LEVELS=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+MAX_SAMPLES=$(( GRAPH_MIN * 60 / REFRESH ))
+[ "$MAX_SAMPLES" -lt "$GRAPH_BUCKETS" ] && MAX_SAMPLES=$GRAPH_BUCKETS
+UP_HIST=()
+DOWN_HIST=()
+
+# "13.84 KB/s" (aster-sysinfo format, 1024-based) -> integer bytes/s
+to_bps() {
+  local num="${1%% *}" unit="${1#* }" mult=1
+  case "$unit" in
+    KB/s) mult=1024 ;;
+    MB/s) mult=1048576 ;;
+    GB/s) mult=1073741824 ;;
+    TB/s) mult=1099511627776 ;;
+  esac
+  awk -v n="$num" -v m="$mult" 'BEGIN{printf "%.0f", n*m}' 2>/dev/null || echo 0
+}
+
+# integer bytes/s -> short human string like "13.8K/s"
+humanize() {
+  awk -v b="$1" 'BEGIN{
+    v=b; u="B"
+    if (v>=1024) {v/=1024; u="K"}
+    if (v>=1024) {v/=1024; u="M"}
+    if (v>=1024) {v/=1024; u="G"}
+    if (v>=100 || u=="B") printf "%.0f%s/s", v, u
+    else printf "%.1f%s/s", v, u
+  }'
+}
+
+# sparkline <array-name>: sets SPARK (block chars, GRAPH_BUCKETS wide,
+# left-padded with baseline for missing history) and PEAK (window max bytes/s)
+sparkline() {
+  local -n _arr=$1
+  local n=${#_arr[@]} max=0 v b j idx bmax start end
+  for v in "${_arr[@]}"; do
+    [ "$v" -gt "$max" ] 2>/dev/null && max=$v
+  done
+  PEAK=$max
+  SPARK=""
+  for ((b = 0; b < GRAPH_BUCKETS; b++)); do
+    start=$(( b * MAX_SAMPLES / GRAPH_BUCKETS ))
+    end=$(( (b + 1) * MAX_SAMPLES / GRAPH_BUCKETS ))
+    bmax=0
+    for ((j = start; j < end; j++)); do
+      idx=$(( j - (MAX_SAMPLES - n) ))
+      if (( idx >= 0 && idx < n )); then
+        v=${_arr[idx]}
+        (( v > bmax )) && bmax=$v
+      fi
+    done
+    if (( max > 0 )); then
+      SPARK+="${LEVELS[bmax * 7 / max]}"
+    else
+      SPARK+="${LEVELS[0]}"
+    fi
+  done
+}
+
+# slot: <label> <value> <warn> <hot> <suffix>
+# Emits ALL three color slots every cycle - the active one with the
+# formatted value, the others empty. asterctl's sensor map accumulates
+# keys (absent keys are never removed), so an empty overwrite is the only
+# way to clear a previously used slot; empty values render nothing.
+slot() {
+  local label="$1" value="$2" warn="$3" hot="$4" suffix="$5" int active="g"
+  if [ -n "$value" ]; then
+    int=${value%%.*}
+    if [ "$int" -ge "$hot" ] 2>/dev/null; then
+      active="r"
+    elif [ "$int" -ge "$warn" ] 2>/dev/null; then
+      active="a"
+    fi
+  fi
+  local c
+  for c in g a r; do
+    if [ "$c" = "$active" ] && [ -n "$value" ]; then
+      echo "${label}_${c}: ${value}${suffix}"
+    else
+      echo "${label}_${c}:"
+    fi
+  done
+}
+
+cpu_temp_from_hwmon() {
+  # fallback: read k10temp (AMD) / coretemp (Intel) directly from sysfs
+  local hw name t
+  for hw in /sys/class/hwmon/hwmon*; do
+    name=$(cat "$hw/name" 2>/dev/null)
+    case "$name" in
+      k10temp|coretemp|zenpower)
+        t=$(cat "$hw"/temp1_input 2>/dev/null)
+        [ -n "$t" ] && echo $((t / 1000)) && return
+        ;;
+    esac
+  done
+}
+
+while :; do
+  # ---- read aster-sysinfo values into S[] -------------------------------
+  unset S; declare -A S
+  if [ -f "$SYSINFO" ]; then
+    while IFS=: read -r key val; do
+      [ -z "$key" ] || [ "${key:0:1}" = "#" ] && continue
+      key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+      val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+      S[$key]="$val"
+    done < "$SYSINFO"
+  fi
+
+  # ---- CPU temperature source ------------------------------------------
+  cputemp=""
+  if [ "$CPU_TEMP_SENSOR" != "auto" ]; then
+    cputemp="${S[$CPU_TEMP_SENSOR]}"
+  else
+    for k in temperature_cpu temperature_k10temp_Tctl temperature_k10temp \
+             temperature_Tctl temperature_coretemp_Package_id_0; do
+      [ -n "${S[$k]}" ] && cputemp="${S[$k]}" && break
+    done
+    if [ -z "$cputemp" ]; then
+      for k in "${!S[@]}"; do
+        case "$k" in
+          temperature_*k10temp*|temperature_*coretemp*|temperature_*Tctl*)
+            [ "${k%"#unit"}" = "$k" ] && cputemp="${S[$k]}" && break ;;
+        esac
+      done
+    fi
+    [ -z "$cputemp" ] && cputemp=$(cpu_temp_from_hwmon)
+  fi
+
+  # ---- GPU utilization (amdgpu iGPU, same die as CPU) -------------------
+  gpuutil=""
+  for f in /sys/class/drm/card*/device/gpu_busy_percent; do
+    [ -f "$f" ] && gpuutil=$(cat "$f" 2>/dev/null) && break
+  done
+
+  # ---- network history ring buffers -------------------------------------
+  UP_HIST+=( "$(to_bps "${S[network_${NETIF}_upload_speed]}")" )
+  DOWN_HIST+=( "$(to_bps "${S[network_${NETIF}_download_speed]}")" )
+  (( ${#UP_HIST[@]} > MAX_SAMPLES )) && UP_HIST=("${UP_HIST[@]:1}")
+  (( ${#DOWN_HIST[@]} > MAX_SAMPLES )) && DOWN_HIST=("${DOWN_HIST[@]:1}")
+
+  # ---- disks: temperatures from emhttp (never wakes disks) --------------
+  hdd_max=0 ssd_max=0 hdd_n=0 ssd_n=0 standby=0 hot_list=""
+  if [ -f "$DISKS_INI" ]; then
+    dname="" dev="" temp=""
+    flush_disk() {
+      [ -z "$dev" ] && return
+      case "$dname" in flash|"") dev=""; return ;; esac
+      if [ "$temp" = "*" ] || [ -z "$temp" ]; then
+        standby=$((standby + 1)); dev=""; return
+      fi
+      local is_ssd=0 limit
+      case "$dev" in nvme*) is_ssd=1 ;; *)
+        [ "$(cat /sys/block/$dev/queue/rotational 2>/dev/null)" = "0" ] && is_ssd=1 ;;
+      esac
+      if [ "$is_ssd" = "1" ]; then
+        ssd_n=$((ssd_n + 1)); [ "$temp" -gt "$ssd_max" ] && ssd_max=$temp
+        limit=$SSD_HOT
+      else
+        hdd_n=$((hdd_n + 1)); [ "$temp" -gt "$hdd_max" ] && hdd_max=$temp
+        limit=$HDD_HOT
+      fi
+      if [ "$temp" -ge "$limit" ] 2>/dev/null; then
+        hot_list="$hot_list, $dname ${temp}°C"
+      fi
+      dev=""
+    }
+    while IFS= read -r line; do
+      case "$line" in
+        \[*\])   flush_disk; dname="${line#[\"}"; dname="${dname%\"]}"
+                 dname="${dname#[}"; dname="${dname%]}"; dev=""; temp="" ;;
+        device=*) dev="${line#device=}"; dev="${dev//\"/}" ;;
+        temp=*)   temp="${line#temp=}"; temp="${temp//\"/}" ;;
+      esac
+    done < "$DISKS_INI"
+    flush_disk
+  fi
+  hot_list="${hot_list#, }"
+
+  # ---- write panel sensor file ------------------------------------------
+  {
+    echo "# generated by unraid-stats.sh"
+    # static captions (rendered by asterctl as plain text sensors)
+    echo "lbl_cpu: CPU / GPU"
+    echo "lbl_cpu_cap: CPU"
+    echo "lbl_gpu_cap: GPU"
+    echo "lbl_ram: RAM"
+    echo "lbl_net: NETWORK"
+    echo "lbl_up: ▲"
+    echo "lbl_down: ▼"
+    echo "lbl_ip: IP"
+
+    slot cpu_util "${S[cpu_usage_percent]%%.*}" "$UTIL_WARN" "$UTIL_HOT" "%"
+    slot gpu_util "${gpuutil%%.*}" "$UTIL_WARN" "$UTIL_HOT" "%"
+    slot cpu_temp "${cputemp%%.*}" "$CPU_TEMP_WARN" "$CPU_TEMP_HOT" "°C"
+    echo "mem_pct: ${S[mem_usage_percent]%%.*}%"
+
+    # always write every key so a NETIF change can never leave stale values
+    # (speed values already contain their unit, e.g. "13.84 KB/s")
+    u="network_${NETIF}_upload_speed"
+    d="network_${NETIF}_download_speed"
+    echo "net_up: ${S[$u]}"
+    echo "net_down: ${S[$d]}"
+    ip="${S[network_${NETIF}_address0]}"
+    echo "net_ip: ${ip%/*}"
+
+    sparkline UP_HIST
+    echo "net_up_graph: $SPARK"
+    echo "net_up_peak: $(humanize "$PEAK") peak"
+    sparkline DOWN_HIST
+    echo "net_down_graph: $SPARK"
+    echo "net_down_peak: $(humanize "$PEAK") peak"
+    echo "lbl_window: last ${GRAPH_MIN} min"
+
+    # always write both keys: one empty, to clear the stale counterpart
+    if [ -n "$hot_list" ]; then
+      echo "disk_alert: ⚠ DISK HOT: $hot_list"
+      echo "disk_ok:"
+    else
+      summary=""
+      [ "$hdd_n" -gt 0 ] && summary="HDD max ${hdd_max}°C"
+      [ "$ssd_n" -gt 0 ] && summary="${summary:+$summary   ·   }SSD max ${ssd_max}°C"
+      [ "$standby" -gt 0 ] && summary="${summary:+$summary   ·   }$standby standby"
+      echo "disk_ok: ${summary:-disks: no data}"
+      echo "disk_alert:"
+    fi
+  } > "$TMP"
+  mv -f "$TMP" "$OUT"
+
+  sleep "$REFRESH"
+done
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/AOOSTARLCD.page" Mode="0644">
+<SHA256>12795dd0ef721233f121045bd8ddff02f8e490ae77671630ff6279d63ba23eda</SHA256>
+<INLINE>
+<![CDATA[
+Menu="Utilities"
+Title="AOOSTAR LCD"
+Icon="aoostar-lcd.png"
+Markdown="true"
+---
+<?PHP
+/* AOOSTAR WTR MAX / GEM12+ PRO integrated display - plugin settings page */
+$alcd_defaults = [
+  'SERVICE'       => 'enabled',
+  'NETIF'         => 'br0',
+  'REFRESH'       => '3',
+  'DISKREFRESH'   => '1800',
+  'SMARTCTL'      => 'no',
+  'CPU_TEMP_WARN' => '70',
+  'CPU_TEMP_HOT'  => '85',
+  'HDD_HOT'       => '45',
+  'SSD_HOT'       => '60',
+  'GRAPH_MIN'     => '15',
+];
+$alcd_flash_cfg = '/boot/config/plugins/aoostar-lcd/aoostar-lcd.cfg';
+$alcd_cfg = $alcd_defaults;
+if (file_exists($alcd_flash_cfg)) {
+  $ini = parse_ini_file($alcd_flash_cfg);
+  if (is_array($ini)) $alcd_cfg = array_replace($alcd_cfg, $ini);
+}
+
+$alcd_ctl_running = !empty(exec("pgrep -f /usr/local/aoostar-lcd/asterctl 2>/dev/null"));
+$alcd_sys_running = !empty(exec("pgrep -f /usr/local/aoostar-lcd/aster-sysinfo 2>/dev/null"));
+$alcd_usb = !empty(exec("lsusb 2>/dev/null | grep -i '0416:90a1'"));
+$alcd_installed = file_exists('/usr/local/aoostar-lcd/asterctl');
+$alcd_running = $alcd_ctl_running;
+
+function alcd_dot($ok, $labelOk, $labelBad) {
+  return $ok
+    ? "<span style='color:green;font-weight:bold'>$labelOk</span>"
+    : "<span style='color:#d00;font-weight:bold'>$labelBad</span>";
+}
+
+/* available network interfaces (with IPv4 address when assigned) */
+$alcd_ifaces = [];
+foreach (scandir('/sys/class/net') ?: [] as $if) {
+  if ($if === '.' || $if === '..' || $if === 'lo') continue;
+  $alcd_ifaces[$if] = '';
+}
+exec('ip -4 -o addr show 2>/dev/null', $alcd_addr_lines);
+foreach ($alcd_addr_lines as $line) {
+  $parts = preg_split('/\s+/', trim($line));
+  if (isset($parts[1], $parts[3]) && array_key_exists($parts[1], $alcd_ifaces)) {
+    $alcd_ifaces[$parts[1]] = explode('/', $parts[3])[0];
+  }
+}
+if (!array_key_exists($alcd_cfg['NETIF'], $alcd_ifaces)) {
+  $alcd_ifaces[$alcd_cfg['NETIF']] = '';
+}
+ksort($alcd_ifaces);
+
+$alcd_logtail = '';
+$alcd_logfile = '/var/log/aoostar-lcd/asterctl.log';
+if (file_exists($alcd_logfile)) {
+  $lines = @file($alcd_logfile);
+  if (is_array($lines)) $alcd_logtail .= "--- asterctl.log ---\n" . implode('', array_slice($lines, -15));
+}
+$alcd_syslogfile = '/var/log/aoostar-lcd/aster-sysinfo.log';
+if (file_exists($alcd_syslogfile)) {
+  $lines = @file($alcd_syslogfile);
+  if (is_array($lines)) $alcd_logtail .= "\n--- aster-sysinfo.log ---\n" . implode('', array_slice($lines, -10));
+}
+?>
+
+**Display driver:** <?=alcd_dot($alcd_ctl_running,'Running','Stopped')?> &nbsp;|&nbsp;
+**Sensor collector:** <?=alcd_dot($alcd_sys_running,'Running','Stopped')?> &nbsp;|&nbsp;
+**LCD USB device (0416:90a1):** <?=alcd_dot($alcd_usb,'Detected','Not found')?>
+
+<input type="button" value="Start" onclick="alcdCmd('start')" <?=$alcd_running?'disabled':''?>>
+<input type="button" value="Stop" onclick="alcdCmd('stop')" <?=$alcd_running?'':'disabled'?>>
+<input type="button" value="Restart" onclick="alcdCmd('restart')" <?=$alcd_running?'':'disabled'?>>
+&nbsp;&nbsp;
+<input type="button" value="Display On" onclick="alcdCmd('on')" <?=$alcd_running?'disabled':''?>>
+<input type="button" value="Display Off" onclick="alcdCmd('off')" <?=$alcd_running?'disabled':''?>>
+&nbsp;&nbsp;
+<input type="button" value="Show available sensors" onclick="alcdCmd('sensors')" <?=$alcd_installed?'':'disabled'?>>
+
+<?if (!$alcd_usb):?>
+<div style="border:1px solid #e68a00;background:rgba(230,138,0,0.1);padding:10px;margin:8px 0">
+<b>Note:</b> the display's USB serial device was not detected. On a WTR MAX it
+should appear in <code>lsusb</code> as ID <code>0416:90a1</code>. Check that the
+internal display cable/USB header is connected.
+</div>
+<?endif;?>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="aoostar-lcd/aoostar-lcd.cfg">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd">
+<input type="hidden" name="#arg[1]" value="apply">
+
+Start automatically at boot:
+: <select name="SERVICE">
+  <option value="enabled" <?=$alcd_cfg['SERVICE']=='enabled'?'selected':''?>>Yes</option>
+  <option value="disabled" <?=$alcd_cfg['SERVICE']=='disabled'?'selected':''?>>No</option>
+  </select>
+
+Network interface shown on the display:
+: <select name="NETIF">
+<?foreach ($alcd_ifaces as $if => $ip):?>
+  <option value="<?=htmlspecialchars($if)?>" <?=$alcd_cfg['NETIF']==$if?'selected':''?>><?=htmlspecialchars($if.($ip ? " ($ip)" : ''))?></option>
+<?endforeach;?>
+  </select>
+
+Network graph time window (minutes):
+: <input type="number" name="GRAPH_MIN" min="1" max="1440" value="<?=htmlspecialchars($alcd_cfg['GRAPH_MIN'])?>">
+
+Sensor refresh interval (seconds):
+: <input type="number" name="REFRESH" min="1" max="60" value="<?=htmlspecialchars($alcd_cfg['REFRESH'])?>">
+
+Disk usage refresh interval (seconds, 0 = disabled):
+: <input type="number" name="DISKREFRESH" min="0" max="86400" value="<?=htmlspecialchars($alcd_cfg['DISKREFRESH'])?>">
+
+Read disk temperatures with smartctl (can wake spun-down disks!):
+: <select name="SMARTCTL">
+  <option value="no" <?=$alcd_cfg['SMARTCTL']=='no'?'selected':''?>>No</option>
+  <option value="yes" <?=$alcd_cfg['SMARTCTL']=='yes'?'selected':''?>>Yes</option>
+  </select>
+
+CPU/GPU temperature: turn amber at (&deg;C):
+: <input type="number" name="CPU_TEMP_WARN" min="30" max="110" value="<?=htmlspecialchars($alcd_cfg['CPU_TEMP_WARN'])?>">
+
+CPU/GPU temperature: turn red at (&deg;C):
+: <input type="number" name="CPU_TEMP_HOT" min="30" max="110" value="<?=htmlspecialchars($alcd_cfg['CPU_TEMP_HOT'])?>">
+
+HDD temperature alert threshold (&deg;C):
+: <input type="number" name="HDD_HOT" min="30" max="70" value="<?=htmlspecialchars($alcd_cfg['HDD_HOT'])?>">
+
+SSD/NVMe temperature alert threshold (&deg;C):
+: <input type="number" name="SSD_HOT" min="30" max="90" value="<?=htmlspecialchars($alcd_cfg['SSD_HOT'])?>">
+
+<input type="submit" value="Apply">
+<input type="button" value="Done" onclick="done()">
+</form>
+
+**Notes**
+
+* The bundled **Unraid Dark** panel shows CPU/GPU utilization and die temperature (green/amber/red by the thresholds above), network up/down speeds + IP, RAM, a clock, and a disk strip along the bottom: a green max-temperature summary normally, switching to a red alert listing any disk at/over its threshold. Disk temperatures come from Unraid itself, so spun-down disks are never woken.
+* Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
+* Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).
+* Extra motherboard sensors (fan RPM etc.) need the it87 kernel driver: install **"IT87 Driver"** (by ich777) from the *Apps* tab.
+* Driver engine: open-source [aoostar-rs](https://github.com/zehnm/aoostar-rs) (`asterctl`), reverse-engineered — no vendor software required.
+
+**Recent log**
+
+<pre style="max-height:300px;overflow:auto"><?=htmlspecialchars($alcd_logtail ?: '(no log yet)')?></pre>
+
+<script>
+function alcdCmd(cmd) {
+  $.post('/plugins/aoostar-lcd/include/exec.php', {cmd: cmd}, function(data) {
+    swal({title: 'aoostar-lcd: ' + cmd, text: '<pre style="text-align:left;max-height:400px;overflow:auto">' + data.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>', type: 'info', html: true},
+         function(){ if (cmd != 'sensors' && cmd != 'status') location.reload(); });
+  }).fail(function() {
+    swal('aoostar-lcd', 'Command failed', 'error');
+  });
+}
+</script>
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/include/exec.php" Mode="0644">
+<SHA256>fffd2b7ddc5e375836d0c3d886e4e8731d25e7485d42049f388e6cf345e728d2</SHA256>
+<INLINE>
+<![CDATA[
+<?php
+/* Button backend for the aoostar-lcd plugin settings page.
+ * Served by the Unraid webgui (behind its authentication). Only a fixed
+ * whitelist of rc-script actions can be invoked. */
+$allowed = ['start', 'stop', 'restart', 'status', 'install', 'sensors', 'on', 'off'];
+$cmd = $_POST['cmd'] ?? '';
+if (!in_array($cmd, $allowed, true)) {
+  http_response_code(400);
+  exit('invalid command');
+}
+header('Content-Type: text/plain; charset=utf-8');
+passthru('/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd ' . escapeshellarg($cmd) . ' 2>&1');
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/sensor-mapping.template" Mode="0644">
+<SHA256>cc6d2ce83b4294f8a0c59ba01f59b37616170ff0fe9a870f4810fe2cd19ea604</SHA256>
+<INLINE>
+<![CDATA[
+# AUTO-GENERATED by the aoostar-lcd plugin - edits will be overwritten!
+# To manage this file manually, delete the AUTO-GENERATED line above.
+#
+# Maps sensor labels used in the panel definition (monitor.json, left side)
+# to sensor labels produced by aster-sysinfo (right side).
+# Run "Show available sensors" on the plugin settings page to list every
+# sensor label your system provides.
+
+cpu_percent: cpu_usage_percent
+cpu_temperature: temperature_cpu
+memory_usage: mem_usage_percent
+memory_Temperature: temperature_memory
+gpu_temperature: temperature_gpu
+
+net_upload_speed: network_@NETIF@_upload_speed
+net_download_speed: network_@NETIF@_download_speed
+net_ip_address: network_@NETIF@_address0
+
+# Per-disk mappings are system specific - examples (uncomment and adapt
+# after checking "Show available sensors"):
+#storage_ssd[0]['used']: storage_ssd[0]_usage_percent
+#storage_ssd[0]['temperature']: temperature_nvme_Composite_YOUR_NVME_MODEL
+#storage_hdd[0]['used']: storage_hdd[0]_usage_percent
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/panel/monitor.json" Mode="0644">
+<SHA256>2a6c613a3a5d29ebaf0d4d398f321eebe622c15a8f1cacb4725831e6d0bb37fc</SHA256>
+<INLINE>
+<![CDATA[
+{
+ "setup": {
+  "switchTime": "30",
+  "refresh": 1
+ },
+ "mianban": [
+  1
+ ],
+ "diy": [
+  {
+   "type": 5,
+   "img": "unraid-dark.png",
+   "sensor": [
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "zone header",
+     "label": "lbl_cpu",
+     "x": 32,
+     "y": 28,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 22,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "CPU utilization (ok)",
+     "label": "cpu_util_g",
+     "x": 16,
+     "y": 64,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 60,
+     "fontColor": "#3fb950",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "CPU utilization (warn)",
+     "label": "cpu_util_a",
+     "x": 16,
+     "y": 64,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 60,
+     "fontColor": "#d29922",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "CPU utilization (hot)",
+     "label": "cpu_util_r",
+     "x": 16,
+     "y": 64,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 60,
+     "fontColor": "#f85149",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "GPU utilization (ok)",
+     "label": "gpu_util_g",
+     "x": 176,
+     "y": 64,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 60,
+     "fontColor": "#3fb950",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "GPU utilization (warn)",
+     "label": "gpu_util_a",
+     "x": 176,
+     "y": 64,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 60,
+     "fontColor": "#d29922",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "GPU utilization (hot)",
+     "label": "gpu_util_r",
+     "x": 176,
+     "y": 64,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 60,
+     "fontColor": "#f85149",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "CPU caption",
+     "label": "lbl_cpu_cap",
+     "x": 16,
+     "y": 146,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 16,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "GPU caption",
+     "label": "lbl_gpu_cap",
+     "x": 176,
+     "y": 146,
+     "width": 160,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 16,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "die temperature (ok)",
+     "label": "cpu_temp_g",
+     "x": 16,
+     "y": 178,
+     "width": 320,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 62,
+     "fontColor": "#3fb950",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "die temperature (warn)",
+     "label": "cpu_temp_a",
+     "x": 16,
+     "y": 178,
+     "width": 320,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 62,
+     "fontColor": "#d29922",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "die temperature (hot)",
+     "label": "cpu_temp_r",
+     "x": 16,
+     "y": 178,
+     "width": 320,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 62,
+     "fontColor": "#f85149",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "RAM caption",
+     "label": "lbl_ram",
+     "x": 32,
+     "y": 266,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 18,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "RAM usage",
+     "label": "mem_pct",
+     "x": 86,
+     "y": 266,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 18,
+     "fontColor": "#e6edf3",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "NET header",
+     "label": "lbl_net",
+     "x": 368,
+     "y": 28,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 22,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "clock",
+     "label": "DATE_h_m_3",
+     "x": 352,
+     "y": 26,
+     "width": 576,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 26,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "upload arrow",
+     "label": "lbl_up",
+     "x": 372,
+     "y": 64,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 32,
+     "fontColor": "#3fb950",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "upload speed",
+     "label": "net_up",
+     "x": 422,
+     "y": 56,
+     "width": 502,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 44,
+     "fontColor": "#e6edf3",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "upload history",
+     "label": "net_up_graph",
+     "x": 372,
+     "y": 106,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 26,
+     "fontColor": "#3fb950",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "upload peak",
+     "label": "net_up_peak",
+     "x": 352,
+     "y": 112,
+     "width": 576,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 15,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "download arrow",
+     "label": "lbl_down",
+     "x": 372,
+     "y": 150,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 32,
+     "fontColor": "#58a6ff",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "download speed",
+     "label": "net_down",
+     "x": 422,
+     "y": 142,
+     "width": 502,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 44,
+     "fontColor": "#e6edf3",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "download history",
+     "label": "net_down_graph",
+     "x": 372,
+     "y": 192,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 26,
+     "fontColor": "#58a6ff",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "download peak",
+     "label": "net_down_peak",
+     "x": 352,
+     "y": 198,
+     "width": 576,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 15,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "IP caption",
+     "label": "lbl_ip",
+     "x": 372,
+     "y": 254,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 18,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "IP address",
+     "label": "net_ip",
+     "x": 412,
+     "y": 252,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 20,
+     "fontColor": "#e6edf3",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "graph window caption",
+     "label": "lbl_window",
+     "x": 352,
+     "y": 256,
+     "width": 576,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 16,
+     "fontColor": "#8b949e",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "disk summary",
+     "label": "disk_ok",
+     "x": 32,
+     "y": 324,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 20,
+     "fontColor": "#3fb950",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "disk alert",
+     "label": "disk_alert",
+     "x": 32,
+     "y": 322,
+     "width": 0,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 22,
+     "fontColor": "#f85149",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    }
+   ]
+  }
+ ]
+}
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/README.md" Mode="0644">
+<SHA256>62ad4bba617dc468b52b8edd06c1cccd94b12575bb2031dee2b9493288a06349</SHA256>
+<INLINE>
+<![CDATA[
+**AOOSTAR LCD**
+
+Drives the integrated case display of the AOOSTAR WTR MAX (and GEM12+ PRO)
+using the open-source aoostar-rs driver (asterctl + aster-sysinfo) — no
+vendor software required. Shows CPU, memory, network and temperature stats
+on the LCD, starts at boot, and is configured from
+*Settings → Utilities → AOOSTAR LCD*.
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/panel/unraid-dark.png" Mode="0644" Type="base64">
+<SHA256>ae68196591540305bc9edce4a16de4ef3a2941b7117aace3d1ff76ce8942c834</SHA256>
+<INLINE>
+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
+QmCC
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# aoostar-lcd plugin post-install script (runs at every install, incl. each boot)
+PLUGIN="aoostar-lcd"
+FLASH="/boot/config/plugins/$PLUGIN"
+CFG="$FLASH/$PLUGIN.cfg"
+
+mkdir -p "$FLASH/packages"
+
+# create default settings once; never overwrite user settings
+if [ ! -f "$CFG" ]; then
+  cat > "$CFG" <<'CFGEOF'
+SERVICE="enabled"
+NETIF="br0"
+REFRESH="3"
+DISKREFRESH="1800"
+SMARTCTL="no"
+CPU_TEMP_WARN="70"
+CPU_TEMP_HOT="85"
+HDD_HOT="45"
+SSD_HOT="60"
+CPU_TEMP_SENSOR="auto"
+GRAPH_MIN="15"
+CFGEOF
+fi
+
+# plugin page icon
+mkdir -p /usr/local/emhttp/plugins/$PLUGIN/images
+base64 -d > /usr/local/emhttp/plugins/$PLUGIN/images/aoostar-lcd.png <<'ICONEOF'
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAyElEQVR42u3auwkCQRQF0ClAUAwM
+NxFMXAzty8asYkM7sAorWBsYnBkRnM+5cMOFeSfc90IQERFJ5jRf15Y65NA/w+hl8K8geh0+G2Fo
+gN6HTyIA+PDRZndoqsUAKbWeAKIIuQD7aa66AAAAqA8g3J/RAgAAAEBJL49btAAAAPgfQM6jAAAA
+ACAF8Fq20QIAAAAAAAAAAAAA0PD/gK72At0uR4dfjzuQAOBICoBDSaeyjqWrhxr+rB4AgEoyHc9r
+TQUAAICISHHe0eEAmT0e7gQAAAAASUVORK5CYII=
+ICONEOF
+
+# install the asterctl package (from flash cache, or GitHub on first install)
+# and start the service; failures are non-fatal - the user can retry from
+# the settings page once network/package is available
+/usr/local/emhttp/plugins/$PLUGIN/scripts/rc.aoostar-lcd start
+
+echo ""
+echo "----------------------------------------------------"
+echo " aoostar-lcd plugin installed."
+echo ""
+echo " Settings page: Settings -> Utilities -> AOOSTAR LCD"
+echo " Panel config:  $FLASH/cfg/monitor.json"
+if ! ls "$FLASH"/packages/asterctl-*.tar.gz >/dev/null 2>&1; then
+  echo ""
+  echo " NOTE: asterctl package not cached yet. If the download"
+  echo " failed (no internet), copy an asterctl release tarball to:"
+  echo "   $FLASH/packages/"
+  echo " from https://github.com/zehnm/aoostar-rs/releases"
+  echo " then click Start on the settings page."
+fi
+echo "----------------------------------------------------"
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# aoostar-lcd plugin removal script
+PLUGIN="aoostar-lcd"
+FLASH="/boot/config/plugins/$PLUGIN"
+
+/usr/local/emhttp/plugins/$PLUGIN/scripts/rc.aoostar-lcd stop 2>/dev/null
+
+rm -rf /usr/local/emhttp/plugins/$PLUGIN
+rm -rf /usr/local/aoostar-lcd
+rm -rf /run/aoostar-lcd /var/log/aoostar-lcd
+rm -f /var/run/$PLUGIN-sysinfo.pid /var/run/$PLUGIN-asterctl.pid
+
+# remove settings and cached packages, but keep the user's panel
+# configuration (cfg/) in case they reinstall
+rm -f "$FLASH/$PLUGIN.cfg"
+rm -rf "$FLASH/packages"
+rmdir "$FLASH" 2>/dev/null
+
+echo "aoostar-lcd plugin removed."
+echo "Note: your panel configuration in $FLASH/cfg (if any) was kept -"
+echo "delete it manually if you no longer want it."
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>
