@@ -74,6 +74,13 @@ The plugin wires them into Unraid properly:
   (sha256 `38d62b8121e24d6bc371f1ada726343314815e6dc9f99701e512788b0c3f8b0a`)
 - `src/` — plugin sources; rebuild with
   `python3 src/make_icon.py && python3 src/build.py`
+- `THIRD-PARTY-NOTICES.md` — license for the redistributed asterctl binaries
+
+## License
+
+The plugin's own code is [MIT](../LICENSE). The bundled asterctl tarball is
+upstream software under its own license — this distribution elects MIT from
+aoostar-rs's MIT/Apache-2.0 dual license; see `THIRD-PARTY-NOTICES.md`.
 
 ## Why not the official AOOSTAR-X binary?
 
