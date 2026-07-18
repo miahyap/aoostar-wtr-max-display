@@ -1,0 +1,157 @@
+Menu="Utilities"
+Title="AOOSTAR LCD"
+Icon="aoostar-lcd.png"
+Markdown="true"
+---
+<?PHP
+/* AOOSTAR WTR MAX / GEM12+ PRO integrated display - plugin settings page */
+$alcd_defaults = [
+  'SERVICE'       => 'enabled',
+  'NETIF'         => 'br0',
+  'REFRESH'       => '3',
+  'DISKREFRESH'   => '1800',
+  'SMARTCTL'      => 'no',
+  'CPU_TEMP_WARN' => '70',
+  'CPU_TEMP_HOT'  => '85',
+  'HDD_HOT'       => '45',
+  'SSD_HOT'       => '60',
+];
+$alcd_flash_cfg = '/boot/config/plugins/aoostar-lcd/aoostar-lcd.cfg';
+$alcd_cfg = $alcd_defaults;
+if (file_exists($alcd_flash_cfg)) {
+  $ini = parse_ini_file($alcd_flash_cfg);
+  if (is_array($ini)) $alcd_cfg = array_replace($alcd_cfg, $ini);
+}
+
+$alcd_ctl_running = !empty(exec("pgrep -f /usr/local/aoostar-lcd/asterctl 2>/dev/null"));
+$alcd_sys_running = !empty(exec("pgrep -f /usr/local/aoostar-lcd/aster-sysinfo 2>/dev/null"));
+$alcd_usb = !empty(exec("lsusb 2>/dev/null | grep -i '0416:90a1'"));
+$alcd_installed = file_exists('/usr/local/aoostar-lcd/asterctl');
+$alcd_running = $alcd_ctl_running;
+
+function alcd_dot($ok, $labelOk, $labelBad) {
+  return $ok
+    ? "<span style='color:green;font-weight:bold'>$labelOk</span>"
+    : "<span style='color:#d00;font-weight:bold'>$labelBad</span>";
+}
+
+/* available network interfaces (with IPv4 address when assigned) */
+$alcd_ifaces = [];
+foreach (scandir('/sys/class/net') ?: [] as $if) {
+  if ($if === '.' || $if === '..' || $if === 'lo') continue;
+  $alcd_ifaces[$if] = '';
+}
+exec('ip -4 -o addr show 2>/dev/null', $alcd_addr_lines);
+foreach ($alcd_addr_lines as $line) {
+  $parts = preg_split('/\s+/', trim($line));
+  if (isset($parts[1], $parts[3]) && array_key_exists($parts[1], $alcd_ifaces)) {
+    $alcd_ifaces[$parts[1]] = explode('/', $parts[3])[0];
+  }
+}
+if (!array_key_exists($alcd_cfg['NETIF'], $alcd_ifaces)) {
+  $alcd_ifaces[$alcd_cfg['NETIF']] = '';
+}
+ksort($alcd_ifaces);
+
+$alcd_logtail = '';
+$alcd_logfile = '/var/log/aoostar-lcd/asterctl.log';
+if (file_exists($alcd_logfile)) {
+  $lines = @file($alcd_logfile);
+  if (is_array($lines)) $alcd_logtail .= "--- asterctl.log ---\n" . implode('', array_slice($lines, -15));
+}
+$alcd_syslogfile = '/var/log/aoostar-lcd/aster-sysinfo.log';
+if (file_exists($alcd_syslogfile)) {
+  $lines = @file($alcd_syslogfile);
+  if (is_array($lines)) $alcd_logtail .= "\n--- aster-sysinfo.log ---\n" . implode('', array_slice($lines, -10));
+}
+?>
+
+**Display driver:** <?=alcd_dot($alcd_ctl_running,'Running','Stopped')?> &nbsp;|&nbsp;
+**Sensor collector:** <?=alcd_dot($alcd_sys_running,'Running','Stopped')?> &nbsp;|&nbsp;
+**LCD USB device (0416:90a1):** <?=alcd_dot($alcd_usb,'Detected','Not found')?>
+
+<input type="button" value="Start" onclick="alcdCmd('start')" <?=$alcd_running?'disabled':''?>>
+<input type="button" value="Stop" onclick="alcdCmd('stop')" <?=$alcd_running?'':'disabled'?>>
+<input type="button" value="Restart" onclick="alcdCmd('restart')" <?=$alcd_running?'':'disabled'?>>
+&nbsp;&nbsp;
+<input type="button" value="Display On" onclick="alcdCmd('on')" <?=$alcd_running?'disabled':''?>>
+<input type="button" value="Display Off" onclick="alcdCmd('off')" <?=$alcd_running?'disabled':''?>>
+&nbsp;&nbsp;
+<input type="button" value="Show available sensors" onclick="alcdCmd('sensors')" <?=$alcd_installed?'':'disabled'?>>
+
+<?if (!$alcd_usb):?>
+<div style="border:1px solid #e68a00;background:rgba(230,138,0,0.1);padding:10px;margin:8px 0">
+<b>Note:</b> the display's USB serial device was not detected. On a WTR MAX it
+should appear in <code>lsusb</code> as ID <code>0416:90a1</code>. Check that the
+internal display cable/USB header is connected.
+</div>
+<?endif;?>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="aoostar-lcd/aoostar-lcd.cfg">
+<input type="hidden" name="#command" value="/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd">
+<input type="hidden" name="#arg[1]" value="apply">
+
+Start automatically at boot:
+: <select name="SERVICE">
+  <option value="enabled" <?=$alcd_cfg['SERVICE']=='enabled'?'selected':''?>>Yes</option>
+  <option value="disabled" <?=$alcd_cfg['SERVICE']=='disabled'?'selected':''?>>No</option>
+  </select>
+
+Network interface shown on the display:
+: <select name="NETIF">
+<?foreach ($alcd_ifaces as $if => $ip):?>
+  <option value="<?=htmlspecialchars($if)?>" <?=$alcd_cfg['NETIF']==$if?'selected':''?>><?=htmlspecialchars($if.($ip ? " ($ip)" : ''))?></option>
+<?endforeach;?>
+  </select>
+
+Sensor refresh interval (seconds):
+: <input type="number" name="REFRESH" min="1" max="60" value="<?=htmlspecialchars($alcd_cfg['REFRESH'])?>">
+
+Disk usage refresh interval (seconds, 0 = disabled):
+: <input type="number" name="DISKREFRESH" min="0" max="86400" value="<?=htmlspecialchars($alcd_cfg['DISKREFRESH'])?>">
+
+Read disk temperatures with smartctl (can wake spun-down disks!):
+: <select name="SMARTCTL">
+  <option value="no" <?=$alcd_cfg['SMARTCTL']=='no'?'selected':''?>>No</option>
+  <option value="yes" <?=$alcd_cfg['SMARTCTL']=='yes'?'selected':''?>>Yes</option>
+  </select>
+
+CPU/GPU temperature: turn amber at (&deg;C):
+: <input type="number" name="CPU_TEMP_WARN" min="30" max="110" value="<?=htmlspecialchars($alcd_cfg['CPU_TEMP_WARN'])?>">
+
+CPU/GPU temperature: turn red at (&deg;C):
+: <input type="number" name="CPU_TEMP_HOT" min="30" max="110" value="<?=htmlspecialchars($alcd_cfg['CPU_TEMP_HOT'])?>">
+
+HDD temperature alert threshold (&deg;C):
+: <input type="number" name="HDD_HOT" min="30" max="70" value="<?=htmlspecialchars($alcd_cfg['HDD_HOT'])?>">
+
+SSD/NVMe temperature alert threshold (&deg;C):
+: <input type="number" name="SSD_HOT" min="30" max="90" value="<?=htmlspecialchars($alcd_cfg['SSD_HOT'])?>">
+
+<input type="submit" value="Apply">
+<input type="button" value="Done" onclick="done()">
+</form>
+
+**Notes**
+
+* The bundled **Unraid Dark** panel shows CPU/GPU utilization and die temperature (green/amber/red by the thresholds above), network up/down speeds + IP, RAM, a clock, and a disk strip along the bottom: a green max-temperature summary normally, switching to a red alert listing any disk at/over its threshold. Disk temperatures come from Unraid itself, so spun-down disks are never woken.
+* Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
+* Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).
+* Extra motherboard sensors (fan RPM etc.) need the it87 kernel driver: install **"IT87 Driver"** (by ich777) from the *Apps* tab.
+* Driver engine: open-source [aoostar-rs](https://github.com/zehnm/aoostar-rs) (`asterctl`), reverse-engineered — no vendor software required.
+
+**Recent log**
+
+<pre style="max-height:300px;overflow:auto"><?=htmlspecialchars($alcd_logtail ?: '(no log yet)')?></pre>
+
+<script>
+function alcdCmd(cmd) {
+  $.post('/plugins/aoostar-lcd/include/exec.php', {cmd: cmd}, function(data) {
+    swal({title: 'aoostar-lcd: ' + cmd, text: '<pre style="text-align:left;max-height:400px;overflow:auto">' + data.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>', type: 'info', html: true},
+         function(){ if (cmd != 'sensors' && cmd != 'status') location.reload(); });
+  }).fail(function() {
+    swal('aoostar-lcd', 'Command failed', 'error');
+  });
+}
+</script>
