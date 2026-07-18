@@ -129,6 +129,34 @@ invalidated it is still in your head.
 4. **Nothing to change is a valid answer** — but only after you've looked.
    Don't assume a change is doc-neutral; confirm it.
 
+## Merging PRs — main requires a review, and bypassing it is the user's call
+
+`main` is protected: **1 approving review required**, squash-only merges. There
+are no required status checks. GitHub does not let a PR author approve their own
+PR, so on this effectively-solo repo `gh pr merge` will fail with *"the base
+branch policy prohibits the merge"* and `reviewDecision: REVIEW_REQUIRED` —
+this is the normal state of a fresh PR here, not a misconfiguration to fix.
+
+`enforce_admins` is **off**, so the owner can override the requirement with
+`gh pr merge <n> --squash --admin`. That works, and for a docs-only change it is
+often the right answer.
+
+### How to do it
+
+1. **Never pass `--admin` on your own initiative.** Bypassing a protection rule
+   the user deliberately set up is their decision, every time. Asking once does
+   not create standing permission for the next PR.
+2. **Surface the options rather than picking one**: admin-bypass now, `--auto`
+   to merge whenever an approval arrives, or relax
+   `required_approving_review_count` if the rule is a permanent obstacle rather
+   than a one-off. Say plainly that the rule as configured can never be
+   satisfied by a solo author, so it recurs on every PR.
+3. **A declined merge leaves the PR open, and that is a fine outcome.** Don't
+   retry with escalating force or look for another route to land it.
+4. **Check the real config before describing it** —
+   `gh api repos/<owner>/<repo>/branches/main/protection` — instead of repeating
+   the summary above, which goes stale if the rules change.
+
 ## Dependencies — only pin versions that have aged at least a week
 
 **When adding or updating any pinned third-party artifact, the version you pin
