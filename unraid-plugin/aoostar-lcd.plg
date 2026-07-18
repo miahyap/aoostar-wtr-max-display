@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "aoostar-lcd">
 <!ENTITY author    "miah.yap">
-<!ENTITY version   "2026.07.18b">
+<!ENTITY version   "2026.07.18c">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" support="https://github.com/zehnm/aoostar-rs/discussions">
 
 <CHANGES>
-###2026.07.18b
+###2026.07.18c
 - Initial release: drive the AOOSTAR WTR MAX / GEM12+ PRO integrated
   display on Unraid using the open-source aoostar-rs driver (asterctl +
   aster-sysinfo). Includes settings page, sensor mapping generation and
@@ -16,7 +16,7 @@
 </CHANGES>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd" Mode="0755">
-<SHA256>b059159bc315fe6f0237f0d9c022b0c91788d211d09d86b122aca5ca10afb574</SHA256>
+<SHA256>e72e044fb2169852a898f59b0c589e6979423457dd9075cb883d46bfa764abd7</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -82,6 +82,25 @@ running() {
 
 rotate_log() {
   [ -f "$1" ] && [ "$(stat -c %s "$1" 2>/dev/null || echo 0)" -gt 2097152 ] && mv -f "$1" "$1.old"
+}
+
+daemonize() {
+  # daemonize <pidfile> <logfile> <command...>
+  # Detach stdio AND close every other inherited fd: when started from the
+  # webgui (update.php / exec.php / plugin install), the caller's fd set
+  # includes the web server's client socket - if the daemon keeps it open,
+  # the browser request never completes (endless spinner).
+  local pidfile="$1" logfile="$2" fd
+  shift 2
+  (
+    exec </dev/null >>"$logfile" 2>&1
+    for fd in /proc/self/fd/*; do
+      fd=${fd##*/}
+      [ "$fd" -gt 2 ] 2>/dev/null && eval "exec ${fd}>&-" 2>/dev/null
+    done
+    exec setsid "$@"
+  ) &
+  echo $! > "$pidfile"
 }
 
 install_pkg() {
@@ -198,29 +217,27 @@ start() {
     echo "Warning: LCD USB device 0416:90a1 not detected - asterctl may fail."
   fi
 
+  cd "$APPDIR" || return 1
+  export RUNDIR NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT CPU_TEMP_SENSOR GRAPH_MIN
+
   echo "Starting aster-sysinfo ..."
   local sysargs=(--out "$RUNDIR/sensors/sysinfo.txt" --temp-dir "$RUNDIR" --refresh "$REFRESH")
   [ "${DISKREFRESH:-0}" -gt 0 ] 2>/dev/null && sysargs+=(--disk-refresh "$DISKREFRESH")
   [ "$SMARTCTL" = "yes" ] && sysargs+=(--smartctl)
-  ( cd "$APPDIR" && setsid "$APPDIR/aster-sysinfo" "${sysargs[@]}" </dev/null >>"$LOG_SYS" 2>&1 &
-    echo $! > "$PIDFILE_SYS" )
+  daemonize "$PIDFILE_SYS" "$LOG_SYS" "$APPDIR/aster-sysinfo" "${sysargs[@]}"
 
   echo "Starting unraid-stats collector ..."
-  ( export RUNDIR NETIF REFRESH CPU_TEMP_WARN CPU_TEMP_HOT HDD_HOT SSD_HOT CPU_TEMP_SENSOR GRAPH_MIN
-    setsid /bin/bash "$STATS" </dev/null >>"$LOG_STATS" 2>&1 &
-    echo $! > "$PIDFILE_STATS" )
+  daemonize "$PIDFILE_STATS" "$LOG_STATS" /bin/bash "$STATS"
 
   # give the collectors a moment to write the first sensor files
   sleep 2
 
   echo "Starting asterctl ..."
-  ( cd "$APPDIR" && setsid "$APPDIR/asterctl" \
+  daemonize "$PIDFILE_CTL" "$LOG_CTL" "$APPDIR/asterctl" \
       --config monitor.json \
       --config-dir "$CFGDIR" \
       --sensor-path "$RUNDIR/sensors" \
-      --sensor-mapping sensor-mapping.cfg \
-      </dev/null >>"$LOG_CTL" 2>&1 &
-    echo $! > "$PIDFILE_CTL" )
+      --sensor-mapping sensor-mapping.cfg
 
   sleep 3
   if proc_running "$APPDIR/asterctl"; then
