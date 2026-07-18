@@ -24,3 +24,13 @@ ssh root@<server> "plugin install /boot/config/plugins/aoostar-lcd.plg"
 ```
 
 Then configure at *Settings → Utilities → AOOSTAR LCD*.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE) — fork and modify
+it freely, but keep the copyright notice in copies you distribute.
+
+The plugin also redistributes the `asterctl` / `aster-sysinfo` binaries from
+[aoostar-rs](https://github.com/zehnm/aoostar-rs), which are covered by their
+own upstream license, not this one. See
+[`unraid-plugin/THIRD-PARTY-NOTICES.md`](unraid-plugin/THIRD-PARTY-NOTICES.md).

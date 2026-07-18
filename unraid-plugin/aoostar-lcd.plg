@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "aoostar-lcd">
 <!ENTITY author    "miah.yap">
-<!ENTITY version   "2026.07.18c">
+<!ENTITY version   "2026.07.18d">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" support="https://github.com/zehnm/aoostar-rs/discussions">
 
 <CHANGES>
-###2026.07.18c
+###2026.07.18d
 - Initial release: drive the AOOSTAR WTR MAX / GEM12+ PRO integrated
   display on Unraid using the open-source aoostar-rs driver (asterctl +
   aster-sysinfo). Includes settings page, sensor mapping generation and
@@ -16,7 +16,7 @@
 </CHANGES>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd" Mode="0755">
-<SHA256>e72e044fb2169852a898f59b0c589e6979423457dd9075cb883d46bfa764abd7</SHA256>
+<SHA256>d0693c996f7a554101c7f7f7d2be36d58470727a38ad4794e1179b96b270d62e</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -155,6 +155,12 @@ install_pkg() {
     return 1
   fi
   chmod +x "$APPDIR/asterctl" "$APPDIR/aster-sysinfo"
+  # the upstream tarball ships no license file, but MIT requires the notice
+  # to accompany the binaries - keep a copy beside them. $APPDIR is RAM and
+  # is repopulated here on every boot, so this must live with the extraction
+  # rather than in install.sh.
+  cp -f "/usr/local/emhttp/plugins/$PLUGIN/LICENSE-asterctl.txt" \
+        "$APPDIR/LICENSE-asterctl.txt" 2>/dev/null
   seed_cfg
 }
 
@@ -639,7 +645,7 @@ done
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/AOOSTARLCD.page" Mode="0644">
-<SHA256>12795dd0ef721233f121045bd8ddff02f8e490ae77671630ff6279d63ba23eda</SHA256>
+<SHA256>f99ade6dd191c07ca5762e74c32e8ae12c45b79d4465dd21e7154e1d89ee322a</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -787,7 +793,7 @@ SSD/NVMe temperature alert threshold (&deg;C):
 * Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
 * Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).
 * Extra motherboard sensors (fan RPM etc.) need the it87 kernel driver: install **"IT87 Driver"** (by ich777) from the *Apps* tab.
-* Driver engine: open-source [aoostar-rs](https://github.com/zehnm/aoostar-rs) (`asterctl`), reverse-engineered — no vendor software required.
+* Driver engine: open-source [aoostar-rs](https://github.com/zehnm/aoostar-rs) (`asterctl`), reverse-engineered — no vendor software required. Licensed under MIT; the full text is installed alongside the binaries at `/usr/local/aoostar-lcd/LICENSE-asterctl.txt`. This plugin's own code is MIT too.
 
 **Recent log**
 
@@ -1677,6 +1683,58 @@ using the open-source aoostar-rs driver (asterctl + aster-sysinfo) — no
 vendor software required. Shows CPU, memory, network and temperature stats
 on the LCD, starts at boot, and is configured from
 *Settings → Utilities → AOOSTAR LCD*.
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/LICENSE-asterctl.txt" Mode="0644">
+<SHA256>5579c3da4445ab2eb3c0cbeb1ebe1935d0e26ed29f8eb7f54831cd81d787d4f8</SHA256>
+<INLINE>
+<![CDATA[
+License for the bundled asterctl / aster-sysinfo binaries
+=========================================================
+
+These binaries come from the aoostar-rs project:
+    https://github.com/zehnm/aoostar-rs
+
+Upstream is dual-licensed "at your option" under the Apache License 2.0 or
+the MIT License. This distribution elects the MIT License, reproduced below
+verbatim as published upstream in LICENSE-MIT.
+
+The upstream file carries no copyright line; it is reproduced unmodified.
+Copyright is held by the aoostar-rs authors.
+
+This license covers ONLY the asterctl / aster-sysinfo binaries. The
+aoostar-lcd plugin's own code is licensed separately under the MIT License
+(see https://github.com/miahyap/aoostar-wtr-max-display).
+
+---------------------------------------------------------------------------
+
+MIT License
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ]]>
 </INLINE>
 </FILE>
