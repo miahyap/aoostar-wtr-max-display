@@ -25,6 +25,20 @@ The plugin wires them into Unraid properly:
 
 ## Install
 
+### From the web UI, by URL (simplest)
+
+**Plugins → Install Plugin**, paste, **Install**:
+
+```
+https://raw.githubusercontent.com/miahyap/aoostar-wtr-max-display/main/unraid-plugin/aoostar-lcd.plg
+```
+
+This needs internet access on first start so `rc.aoostar-lcd` can fetch and
+checksum-verify the asterctl tarball; it is cached on flash afterwards. Skip
+to step 3 below once it finishes.
+
+### From flash (works fully offline)
+
 1. Copy the plugin (and optionally the verified driver tarball for a
    fully offline install) to the Unraid flash drive:
 
