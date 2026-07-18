@@ -15,7 +15,18 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.07.18d'
+VERSION = '2026.07.18e'
+
+# Unraid's Plugins page uses pluginURL to check for and install updates to an
+# already-installed plugin. Without it the plugin can only ever be updated by
+# hand. (If this is ever submitted to Community Applications, the CA template's
+# <PluginURL> must match this string exactly.)
+PLUGIN_URL = ('https://raw.githubusercontent.com/miahyap/'
+              'aoostar-wtr-max-display/main/unraid-plugin/aoostar-lcd.plg')
+
+# Support venue for THIS plugin - must not point at the upstream aoostar-rs
+# project, or bug reports for the plugin land on the driver author's board.
+SUPPORT_URL = 'https://github.com/miahyap/aoostar-wtr-max-display/issues'
 
 # MIT requires its notice to travel with every copy of the software, and the
 # upstream asterctl tarball ships no license file of its own - so the plugin
@@ -80,7 +91,8 @@ def main():
     parts.append(']>\n\n')
     parts.append('<PLUGIN name="&name;" author="&author;" version="&version;" '
                  'min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" '
-                 'support="https://github.com/zehnm/aoostar-rs/discussions">\n\n')
+                 f'pluginURL="{PLUGIN_URL}" '
+                 f'support="{SUPPORT_URL}">\n\n')
     parts.append(f'''<CHANGES>
 ###{VERSION}
 - Initial release: drive the AOOSTAR WTR MAX / GEM12+ PRO integrated

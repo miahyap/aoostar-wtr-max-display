@@ -46,6 +46,12 @@ Everything the plugin ships is **generated** — never hand-edit build outputs.
 - New colours/positions belong in the named constants (palette, zone tuples)
   at the top of `make_panel.py`, not as literals sprinkled into sensor
   definitions.
+- The `<PLUGIN>` tag's `pluginURL` and `support` attributes come from
+  `PLUGIN_URL` / `SUPPORT_URL` in `build.py`. `support` must point at this
+  repo's issues — never at upstream aoostar-rs, or plugin bug reports land on
+  the driver author's board. `pluginURL` is what Unraid's Plugins page uses to
+  self-update an installed plugin, so it must stay a valid raw URL to the
+  committed plg.
 - Dynamic color = triple label slots (`_g`/`_a`/`_r`) written by
   `unraid-stats.sh`. Every label must be rewritten every cycle (empty value =
   render nothing): asterctl's sensor map never drops absent keys, so relying
