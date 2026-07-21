@@ -15,7 +15,7 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.07.18e'
+VERSION = '2026.07.21'
 
 # Unraid's Plugins page uses pluginURL to check for and install updates to an
 # already-installed plugin. Without it the plugin can only ever be updated by
@@ -95,6 +95,11 @@ def main():
                  f'support="{SUPPORT_URL}">\n\n')
     parts.append(f'''<CHANGES>
 ###{VERSION}
+- Add an optional daily on/off schedule: turn the display off and back
+  on at configured times each day (cron drives the rc script's new
+  sleep/wake verbs). Configured on the settings page.
+
+###2026.07.18e
 - Initial release: drive the AOOSTAR WTR MAX / GEM12+ PRO integrated
   display on Unraid using the open-source aoostar-rs driver (asterctl +
   aster-sysinfo). Includes settings page, sensor mapping generation and

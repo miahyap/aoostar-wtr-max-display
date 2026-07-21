@@ -16,6 +16,9 @@ $alcd_defaults = [
   'HDD_HOT'       => '45',
   'SSD_HOT'       => '60',
   'GRAPH_MIN'     => '15',
+  'SCHEDULE'      => 'disabled',
+  'SCHED_OFF'     => '23:00',
+  'SCHED_ON'      => '07:00',
 ];
 $alcd_flash_cfg = '/boot/config/plugins/aoostar-lcd/aoostar-lcd.cfg';
 $alcd_cfg = $alcd_defaults;
@@ -99,6 +102,18 @@ Start automatically at boot:
   <option value="disabled" <?=$alcd_cfg['SERVICE']=='disabled'?'selected':''?>>No</option>
   </select>
 
+Turn the display off and back on automatically each day:
+: <select name="SCHEDULE">
+  <option value="disabled" <?=$alcd_cfg['SCHEDULE']=='disabled'?'selected':''?>>No</option>
+  <option value="enabled" <?=$alcd_cfg['SCHEDULE']=='enabled'?'selected':''?>>Yes</option>
+  </select>
+
+&nbsp;&nbsp;&bull; turn the display off at:
+: <input type="time" name="SCHED_OFF" value="<?=htmlspecialchars($alcd_cfg['SCHED_OFF'])?>">
+
+&nbsp;&nbsp;&bull; turn the display back on at:
+: <input type="time" name="SCHED_ON" value="<?=htmlspecialchars($alcd_cfg['SCHED_ON'])?>">
+
 Network interface shown on the display:
 : <select name="NETIF">
 <?foreach ($alcd_ifaces as $if => $ip):?>
@@ -139,6 +154,7 @@ SSD/NVMe temperature alert threshold (&deg;C):
 
 **Notes**
 
+* The **daily on/off schedule** turns the panel off at the *off* time and back on at the *on* time (24-hour clock, server local time). While off, the driver is fully stopped to release the display, so the status above reads *Stopped* during the off window - this is expected. A manual *Start* wakes it early; the next scheduled off-time still applies. The schedule only runs when *Start automatically at boot* is set to Yes.
 * The bundled **Unraid Dark** panel shows CPU/GPU utilization and die temperature (green/amber/red by the thresholds above), network up/down speeds + IP, RAM, a clock, and a disk strip along the bottom: a green max-temperature summary normally, switching to a red alert listing any disk at/over its threshold. Disk temperatures come from Unraid itself, so spun-down disks are never woken.
 * Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
 * Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).
