@@ -15,7 +15,8 @@ The plugin wires them into Unraid properly:
 - Starts at boot (independent of the array — nothing touches `/mnt`)
 - Settings page under *Settings → Utilities → AOOSTAR LCD*: status,
   start/stop, display on/off, sensor listing, and options (autostart,
-  network interface, refresh intervals, smartctl on/off)
+  a daily off/on schedule, network interface, refresh intervals,
+  smartctl on/off)
 - Panel config and sensor mapping persist on the flash drive at
   `/boot/config/plugins/aoostar-lcd/cfg/`
 - The asterctl release tarball is cached on flash, so reboots reinstall
@@ -141,6 +142,5 @@ want to keep — a hand-edited `monitor.json` is not the source of truth.
 
 - **Multiple rotating panels** via `switchTime` in `monitor.json`
   (array usage, parity status, Docker containers...).
-- **Display off at night** via cron calling the rc script.
 - Consider a Community Applications listing — see the root README for what
   that would require.
