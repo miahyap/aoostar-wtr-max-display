@@ -10,6 +10,10 @@ rm -rf /usr/local/aoostar-lcd
 rm -rf /run/aoostar-lcd /var/log/aoostar-lcd
 rm -f /var/run/$PLUGIN-sysinfo.pid /var/run/$PLUGIN-asterctl.pid
 
+# drop the daily on/off schedule and rebuild root's crontab without it
+rm -f /etc/cron.d/$PLUGIN
+[ -x /usr/local/sbin/update_cron ] && /usr/local/sbin/update_cron 2>/dev/null
+
 # remove settings and cached packages, but keep the user's panel
 # configuration (cfg/) in case they reinstall
 rm -f "$FLASH/$PLUGIN.cfg"
