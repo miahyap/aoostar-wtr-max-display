@@ -2,7 +2,10 @@
 # rc.aoostar-lcd - control script for the AOOSTAR WTR MAX / GEM12+ PRO
 # integrated display driver on Unraid.
 #
-# Usage: rc.aoostar-lcd start|stop|restart|status|install|sensors|on|off|sleep|wake|apply
+# Usage: rc.aoostar-lcd start|stop|restart|upgrade|status|install|sensors|on|off|sleep|wake|apply
+#
+# upgrade is what the plugin's install script runs: start, but replacing a
+# service that is already running (see upgrade()).
 #
 # sleep/wake are the daily-schedule verbs driven by cron (see write_cron):
 # sleep stops the service and powers the panel off; wake starts it again.
@@ -310,6 +313,19 @@ stop() {
   echo "aoostar-lcd stopped."
 }
 
+upgrade() {
+  # Run by install.sh at every plugin install - each boot AND each update.
+  # At boot nothing is running and this is a plain start. On an update the
+  # old daemons are still alive: bash has the previous collector script in
+  # memory, and start() returns early at "already running" before seed_cfg
+  # can install the new panel - so the update silently did nothing until the
+  # next reboot. Stop first so the new files actually take effect.
+  if running; then
+    stop
+  fi
+  start
+}
+
 status() {
   local ok=1
   if proc_running "$APPDIR/aster-sysinfo"; then
@@ -350,6 +366,9 @@ case "$1" in
   restart)
     stop
     start
+    ;;
+  upgrade)
+    upgrade
     ;;
   status)
     status
@@ -399,7 +418,7 @@ case "$1" in
     [ "$SERVICE" = "enabled" ] && start
     ;;
   *)
-    echo "Usage: $0 start|stop|restart|status|install|sensors|on|off|sleep|wake|apply"
+    echo "Usage: $0 start|stop|restart|upgrade|status|install|sensors|on|off|sleep|wake|apply"
     exit 1
     ;;
 esac

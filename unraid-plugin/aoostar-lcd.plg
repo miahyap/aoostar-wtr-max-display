@@ -2,12 +2,16 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "aoostar-lcd">
 <!ENTITY author    "miah.yap">
-<!ENTITY version   "2026.11.17a">
+<!ENTITY version   "2026.11.17b">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" pluginURL="https://raw.githubusercontent.com/miahyap/aoostar-wtr-max-display/main/unraid-plugin/aoostar-lcd.plg" support="https://github.com/miahyap/aoostar-wtr-max-display/issues">
 
 <CHANGES>
+###2026.11.17b
+- Updating the plugin now restarts the display service, so a new version
+  takes effect immediately instead of after the next reboot.
+
 ###2026.11.17a
 - Redesigned panel for legibility on the real display: CPU, GPU,
   temperature and RAM as four large tiles; each network speed next to its
@@ -43,14 +47,17 @@
 </CHANGES>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/scripts/rc.aoostar-lcd" Mode="0755">
-<SHA256>572752cf5e136803c66a74fd0e5ee1c88448d7562e7f6f373ec3be06d24f6bbf</SHA256>
+<SHA256>17bb20e000d9166e02e75224c591a441a099d9b8c2f35024d1ca4f7ce207fc7f</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
 # rc.aoostar-lcd - control script for the AOOSTAR WTR MAX / GEM12+ PRO
 # integrated display driver on Unraid.
 #
-# Usage: rc.aoostar-lcd start|stop|restart|status|install|sensors|on|off|sleep|wake|apply
+# Usage: rc.aoostar-lcd start|stop|restart|upgrade|status|install|sensors|on|off|sleep|wake|apply
+#
+# upgrade is what the plugin's install script runs: start, but replacing a
+# service that is already running (see upgrade()).
 #
 # sleep/wake are the daily-schedule verbs driven by cron (see write_cron):
 # sleep stops the service and powers the panel off; wake starts it again.
@@ -358,6 +365,19 @@ stop() {
   echo "aoostar-lcd stopped."
 }
 
+upgrade() {
+  # Run by install.sh at every plugin install - each boot AND each update.
+  # At boot nothing is running and this is a plain start. On an update the
+  # old daemons are still alive: bash has the previous collector script in
+  # memory, and start() returns early at "already running" before seed_cfg
+  # can install the new panel - so the update silently did nothing until the
+  # next reboot. Stop first so the new files actually take effect.
+  if running; then
+    stop
+  fi
+  start
+}
+
 status() {
   local ok=1
   if proc_running "$APPDIR/aster-sysinfo"; then
@@ -398,6 +418,9 @@ case "$1" in
   restart)
     stop
     start
+    ;;
+  upgrade)
+    upgrade
     ;;
   status)
     status
@@ -447,7 +470,7 @@ case "$1" in
     [ "$SERVICE" = "enabled" ] && start
     ;;
   *)
-    echo "Usage: $0 start|stop|restart|status|install|sensors|on|off|sleep|wake|apply"
+    echo "Usage: $0 start|stop|restart|upgrade|status|install|sensors|on|off|sleep|wake|apply"
     exit 1
     ;;
 esac
@@ -2223,8 +2246,10 @@ ICONEOF
 
 # install the asterctl package (from flash cache, or GitHub on first install)
 # and start the service; failures are non-fatal - the user can retry from
-# the settings page once network/package is available
-/usr/local/emhttp/plugins/$PLUGIN/scripts/rc.aoostar-lcd start
+# the settings page once network/package is available.
+# "upgrade", not "start": on a plugin update the previous version is still
+# running, and a plain start would leave it in place.
+/usr/local/emhttp/plugins/$PLUGIN/scripts/rc.aoostar-lcd upgrade
 
 echo ""
 echo "----------------------------------------------------"

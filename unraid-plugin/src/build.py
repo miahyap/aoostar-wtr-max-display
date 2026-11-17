@@ -15,7 +15,7 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.11.17a'
+VERSION = '2026.11.17b'
 
 # Unraid's Plugins page uses pluginURL to check for and install updates to an
 # already-installed plugin. Without it the plugin can only ever be updated by
@@ -95,6 +95,10 @@ def main():
                  f'support="{SUPPORT_URL}">\n\n')
     parts.append(f'''<CHANGES>
 ###{VERSION}
+- Updating the plugin now restarts the display service, so a new version
+  takes effect immediately instead of after the next reboot.
+
+###2026.11.17a
 - Redesigned panel for legibility on the real display: CPU, GPU,
   temperature and RAM as four large tiles; each network speed next to its
   arrow with its history graph and peak; a bottom strip with disk

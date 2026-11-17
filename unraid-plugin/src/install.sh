@@ -34,8 +34,10 @@ ICONEOF
 
 # install the asterctl package (from flash cache, or GitHub on first install)
 # and start the service; failures are non-fatal - the user can retry from
-# the settings page once network/package is available
-/usr/local/emhttp/plugins/$PLUGIN/scripts/rc.aoostar-lcd start
+# the settings page once network/package is available.
+# "upgrade", not "start": on a plugin update the previous version is still
+# running, and a plain start would leave it in place.
+/usr/local/emhttp/plugins/$PLUGIN/scripts/rc.aoostar-lcd upgrade
 
 echo ""
 echo "----------------------------------------------------"
