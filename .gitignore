@@ -5,3 +5,4 @@ WTR MAX+GEM12+ PRO Screen Software/*
 
 # macOS
 .DS_Store
+__pycache__/

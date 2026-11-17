@@ -2,12 +2,24 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "aoostar-lcd">
 <!ENTITY author    "miah.yap">
-<!ENTITY version   "2026.11.17">
+<!ENTITY version   "2026.11.17a">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" min="6.11.0" icon="aoostar-lcd.png" launch="Settings/AOOSTARLCD" pluginURL="https://raw.githubusercontent.com/miahyap/aoostar-wtr-max-display/main/unraid-plugin/aoostar-lcd.plg" support="https://github.com/miahyap/aoostar-wtr-max-display/issues">
 
 <CHANGES>
+###2026.11.17a
+- Redesigned panel for legibility on the real display: CPU, GPU,
+  temperature and RAM as four large tiles; each network speed next to its
+  arrow with its history graph and peak; a bottom strip with disk
+  temperatures, array usage, IP address and clock. Pure black background,
+  saturated colors, no text below 20 px.
+- Fixed text placement: captions no longer straddle zone borders and an
+  idle network graph no longer drops onto the row below.
+- RAM is now colored by threshold; the disk alert names up to three disks.
+- Note: a hand-customized monitor.json keeps working only for labels that
+  still exist - several panel labels changed with this redesign.
+
 ###2026.11.17
 - Network speeds now come from the kernel's own counters, so bridges and
   bonds (br0, bond0) work; the interface defaults to "auto" (the default
@@ -444,7 +456,7 @@ esac
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/scripts/unraid-stats.sh" Mode="0755">
-<SHA256>ed5073cc088ba1438ff0dd37390f79420322ef69d301f337daff03f814e6bc36</SHA256>
+<SHA256>7fce21cd6a4b6922798f07dc69d73828169b10337b70d850277a6e728cd76274</SHA256>
 <INLINE>
 <![CDATA[
 #!/bin/bash
@@ -497,13 +509,25 @@ CPU_TEMP_WARN="${CPU_TEMP_WARN:-70}"
 CPU_TEMP_HOT="${CPU_TEMP_HOT:-85}"
 UTIL_WARN="${UTIL_WARN:-70}"
 UTIL_HOT="${UTIL_HOT:-90}"
+MEM_WARN="${MEM_WARN:-80}"
+MEM_HOT="${MEM_HOT:-92}"
 HDD_HOT="${HDD_HOT:-45}"
 SSD_HOT="${SSD_HOT:-60}"
 CPU_TEMP_SENSOR="${CPU_TEMP_SENSOR:-auto}"
 GRAPH_MIN="${GRAPH_MIN:-15}"
 
-GRAPH_BUCKETS=26
+# number of sparkline columns - make_panel.py reads this to check that the
+# graph fits its slot at the panel's font size
+GRAPH_BUCKETS=14
 LEVELS=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+# Every sparkline starts with this full-height, one-eighth-wide glyph (it
+# reads as the graph's y-axis). asterctl positions a string by its TALLEST
+# glyph, so without a constant full-height glyph an all-baseline sparkline
+# (idle link) renders 0.7 x the font size lower than a busy one - on the
+# first panel it dropped onto the download speed below it.
+SPARK_AXIS="▏"
+# at most this many hot disks are named in the alert; the rest are counted
+ALERT_MAX=3
 # the address rarely changes and reading it costs a fork: refresh it only
 # every IP_EVERY cycles (and whenever the interface changes)
 IP_EVERY=20
@@ -765,8 +789,8 @@ spark_level() {
   LEVEL=$l
 }
 
-# sparkline <bucket-array-name>: sets SPARK (GRAPH_BUCKETS block chars) and
-# PEAK (window max, bytes/s)
+# sparkline <bucket-array-name>: sets SPARK (SPARK_AXIS + GRAPH_BUCKETS block
+# chars) and PEAK (window max, bytes/s)
 sparkline() {
   local -n _arr=$1
   local v max=0
@@ -774,7 +798,7 @@ sparkline() {
     (( v > max )) && max=$v
   done
   PEAK=$max
-  SPARK=""
+  SPARK=$SPARK_AXIS
   for v in "${_arr[@]}"; do
     spark_level "$v" "$max"
     SPARK+="${LEVELS[LEVEL]}"
@@ -804,6 +828,13 @@ flush_disk() {
   local limit
   [ -z "$d_dev" ] && return
   case "$d_name" in flash|"") d_dev=""; return ;; esac
+  # array capacity: data disks only (parity has no filesystem, pools are
+  # separate). Sizes are emhttp's cached numbers, so standby disks count
+  # without being woken.
+  if [ "$d_type" = "Data" ] && [ "$d_size" -gt 0 ] 2>/dev/null; then
+    arr_size=$(( arr_size + d_size ))
+    arr_used=$(( arr_used + ${d_used:-0} ))
+  fi
   if [ "$d_temp" = "*" ] || [ -z "$d_temp" ]; then
     standby=$(( standby + 1 )); d_dev=""; return
   fi
@@ -815,86 +846,102 @@ flush_disk() {
     limit=$HDD_HOT
   fi
   if [ "$d_temp" -ge "$limit" ] 2>/dev/null; then
-    hot_list="$hot_list, $d_name ${d_temp}°C"
+    hot_n=$(( hot_n + 1 ))
+    (( hot_n <= ALERT_MAX )) && hot_list="$hot_list, $d_name ${d_temp}°C"
   fi
   d_dev=""
 }
 
-# temperatures from emhttp's cache (never wakes disks); sets hdd_max ssd_max
-# hdd_n ssd_n standby hot_list
+# temperatures and sizes from emhttp's cache (never wakes disks); sets
+# hdd_max ssd_max hdd_n ssd_n standby hot_list hot_n arr_size arr_used
 read_disks() {
   local line
-  hdd_max=0 ssd_max=0 hdd_n=0 ssd_n=0 standby=0 hot_list=""
-  d_name="" d_dev="" d_temp="" d_rot=""
+  hdd_max=0 ssd_max=0 hdd_n=0 ssd_n=0 standby=0 hot_list="" hot_n=0
+  arr_size=0 arr_used=0
+  d_name="" d_dev="" d_temp="" d_rot="" d_type="" d_size="" d_used=""
   [ -f "$DISKS_INI" ] || return 0
   while IFS= read -r line; do
     case "$line" in
       \[*\])   flush_disk; d_name="${line#[\"}"; d_name="${d_name%\"]}"
                d_name="${d_name#[}"; d_name="${d_name%]}"
-               d_dev="" d_temp="" d_rot="" ;;
+               d_dev="" d_temp="" d_rot="" d_type="" d_size="" d_used="" ;;
       device=*)     d_dev="${line#device=}"; d_dev="${d_dev//\"/}" ;;
       temp=*)       d_temp="${line#temp=}"; d_temp="${d_temp//\"/}" ;;
       rotational=*) d_rot="${line#rotational=}"; d_rot="${d_rot//\"/}" ;;
+      type=*)       d_type="${line#type=}"; d_type="${d_type//\"/}" ;;
+      fsSize=*)     d_size="${line#fsSize=}"; d_size="${d_size//\"/}" ;;
+      fsUsed=*)     d_used="${line#fsUsed=}"; d_used="${d_used//\"/}" ;;
     esac
   done < "$DISKS_INI"
   flush_disk
   hot_list="${hot_list#, }"
+  (( hot_n > ALERT_MAX )) && hot_list="$hot_list +$(( hot_n - ALERT_MAX ))"
+  return 0
 }
 
 # -------------------------------------------------------------------- output
 
 write_panel() {
-  local summary
+  local summary window
   echo "# generated by unraid-stats.sh"
   # static captions (rendered by asterctl as plain text sensors)
-  echo "lbl_cpu: CPU / GPU"
-  echo "lbl_cpu_cap: CPU"
-  echo "lbl_gpu_cap: GPU"
+  echo "lbl_cpu: CPU"
+  echo "lbl_gpu: GPU"
+  echo "lbl_temp: TEMP"
   echo "lbl_ram: RAM"
-  echo "lbl_net: NETWORK"
   echo "lbl_up: ▲"
   echo "lbl_down: ▼"
-  echo "lbl_ip: IP"
+  if (( GRAPH_MIN >= 120 && GRAPH_MIN % 60 == 0 )); then
+    window="$(( GRAPH_MIN / 60 )) h"
+  else
+    window="${GRAPH_MIN} min"
+  fi
+  echo "lbl_peak: $window peak"
 
   slot cpu_util "${S[cpu_usage_percent]%%.*}" "$UTIL_WARN" "$UTIL_HOT" "%"
   slot gpu_util "${GPUUTIL%%.*}" "$UTIL_WARN" "$UTIL_HOT" "%"
   slot cpu_temp "${CPUTEMP%%.*}" "$CPU_TEMP_WARN" "$CPU_TEMP_HOT" "°C"
-  echo "mem_pct: ${S[mem_usage_percent]%%.*}%"
+  slot mem_pct "${S[mem_usage_percent]%%.*}" "$MEM_WARN" "$MEM_HOT" "%"
 
   # always write every key so an interface change can never leave stale
-  # values. A broken interface shows its problem instead of "0 B/s", which
-  # is indistinguishable from an idle link.
+  # values. A broken interface shows "n/a" plus its problem instead of
+  # "0 B/s", which is indistinguishable from an idle link. ("n/a" rather
+  # than dashes: asterctl positions text by its tallest glyph, and the "/"
+  # keeps these on the same baseline as "13.8 MB/s".)
   if [ "$NET_STATE" = "ok" ]; then
     humanize "$NET_UP";   echo "net_up: $HUMAN"
     humanize "$NET_DOWN"; echo "net_down: $HUMAN"
-    echo "net_ip: ${NET_IP:-no IPv4 on $IFACE}"
+    NET_NOTE="${NET_IP:-no IPv4 on $IFACE}"
   else
-    echo "net_up: --"
-    echo "net_down: --"
-    echo "net_ip: $NET_STATE"
+    echo "net_up: n/a"
+    echo "net_down: n/a"
+    NET_NOTE="$NET_STATE"
   fi
 
   sparkline UP_B
   humanize "$PEAK"
   echo "net_up_graph: $SPARK"
-  echo "net_up_peak: $HUMAN peak"
+  echo "net_up_peak: $HUMAN"
   sparkline DOWN_B
   humanize "$PEAK"
   echo "net_down_graph: $SPARK"
-  echo "net_down_peak: $HUMAN peak"
-  echo "lbl_window: last ${GRAPH_MIN} min"
+  echo "net_down_peak: $HUMAN"
 
-  # always write both keys: one empty, to clear the stale counterpart
+  # always write both disk keys: one empty, to clear the stale counterpart
   if [ -n "$hot_list" ]; then
-    echo "disk_alert: ⚠ DISK HOT: $hot_list"
+    echo "disk_alert: ⚠ HOT: $hot_list"
     echo "disk_ok:"
+    # the alert can need the strip's full width: it outranks the address
+    echo "net_ip:"
   else
     summary=""
-    [ "$hdd_n" -gt 0 ] && summary="HDD max ${hdd_max}°C"
-    [ "$ssd_n" -gt 0 ] && summary="${summary:+$summary   ·   }SSD max ${ssd_max}°C"
-    [ "$standby" -gt 0 ] && summary="${summary:+$summary   ·   }$standby standby"
+    [ "$hdd_n" -gt 0 ] && summary="HDD ${hdd_max}°C"
+    [ "$ssd_n" -gt 0 ] && summary="${summary:+$summary · }SSD ${ssd_max}°C"
+    [ "$standby" -gt 0 ] && summary="${summary:+$summary · }$standby standby"
+    [ "$arr_size" -gt 0 ] && summary="${summary:+$summary · }Array $(( arr_used * 100 / arr_size ))%"
     echo "disk_ok: ${summary:-disks: no data}"
     echo "disk_alert:"
+    echo "net_ip: $NET_NOTE"
   fi
 }
 
@@ -940,7 +987,7 @@ done
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/AOOSTARLCD.page" Mode="0644">
-<SHA256>00d6985784d9eb7a211ac6f03cea74b711a09fe4eca16f971a11445567847a7b</SHA256>
+<SHA256>6e24d128b559039f2bbdc399b393e7f9e3bc16a6c6e0bb07e1c7af9d59936f32</SHA256>
 <INLINE>
 <![CDATA[
 Menu="Utilities"
@@ -1102,7 +1149,7 @@ SSD/NVMe temperature alert threshold (&deg;C):
 
 * The **daily on/off schedule** turns the panel off at the *off* time and back on at the *on* time (24-hour clock, server local time). While off, the driver is fully stopped to release the display, so the status above reads *Stopped* during the off window - this is expected. A manual *Start* wakes it early; the next scheduled off-time still applies. The schedule only runs when *Start automatically at boot* is set to Yes.
 * **Network interface**: *auto* follows the default route (`br0` on a stock Unraid). If the chosen interface is unplugged or missing, the panel says so (e.g. `eth3 link down`) instead of showing `0 B/s`.
-* The bundled **Unraid Dark** panel shows CPU/GPU utilization and die temperature (green/amber/red by the thresholds above), network up/down speeds + IP, RAM, a clock, and a disk strip along the bottom: a green max-temperature summary normally, switching to a red alert listing any disk at/over its threshold. Disk temperatures come from Unraid itself, so spun-down disks are never woken.
+* The bundled **Unraid Dark** panel shows CPU, GPU, die temperature and RAM as four large tiles (green/amber/red; temperature by the thresholds above), network up/down speeds with history graphs and window peaks, and a strip along the bottom with a green disk summary (hottest HDD/SSD, standby count, array usage), the IP address and a clock. The summary switches to a red alert naming any disk at/over its threshold. Disk temperatures come from Unraid itself, so spun-down disks are never woken.
 * Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
 * Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).
 * Extra motherboard sensors (fan RPM etc.) need the it87 kernel driver: install **"IT87 Driver"** (by ich777) from the *Apps* tab.
@@ -1178,7 +1225,7 @@ net_ip_address: network_@NETIF@_address0
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/panel/monitor.json" Mode="0644">
-<SHA256>2a6c613a3a5d29ebaf0d4d398f321eebe622c15a8f1cacb4725831e6d0bb37fc</SHA256>
+<SHA256>b1451f0327f4f6652294448ee58b48885a6840982bad42cc9c0ff2e3807d6602</SHA256>
 <INLINE>
 <![CDATA[
 {
@@ -1197,19 +1244,19 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "zone header",
+     "name": "CPU utilization caption",
      "label": "lbl_cpu",
-     "x": 32,
-     "y": 28,
-     "width": 0,
+     "x": 13,
+     "y": 37,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 22,
-     "fontColor": "#8b949e",
+     "fontSize": 24,
+     "fontColor": "#b3bcc8",
      "fontWeight": "normal",
-     "textAlign": "left",
+     "textAlign": "center",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -1226,15 +1273,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "CPU utilization (ok)",
      "label": "cpu_util_g",
-     "x": 16,
-     "y": 64,
-     "width": 160,
+     "x": 13,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 60,
-     "fontColor": "#3fb950",
+     "fontSize": 68,
+     "fontColor": "#2fe36a",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1253,15 +1300,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "CPU utilization (warn)",
      "label": "cpu_util_a",
-     "x": 16,
-     "y": 64,
-     "width": 160,
+     "x": 13,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 60,
-     "fontColor": "#d29922",
+     "fontSize": 68,
+     "fontColor": "#ffb300",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1280,15 +1327,42 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "CPU utilization (hot)",
      "label": "cpu_util_r",
-     "x": 16,
-     "y": 64,
-     "width": 160,
+     "x": 13,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 60,
-     "fontColor": "#f85149",
+     "fontSize": 68,
+     "fontColor": "#ff4136",
+     "fontWeight": "normal",
+     "textAlign": "center",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "GPU utilization caption",
+     "label": "lbl_gpu",
+     "x": 249,
+     "y": 37,
+     "width": 226,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 24,
+     "fontColor": "#b3bcc8",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1307,15 +1381,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "GPU utilization (ok)",
      "label": "gpu_util_g",
-     "x": 176,
-     "y": 64,
-     "width": 160,
+     "x": 249,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 60,
-     "fontColor": "#3fb950",
+     "fontSize": 68,
+     "fontColor": "#2fe36a",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1334,15 +1408,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "GPU utilization (warn)",
      "label": "gpu_util_a",
-     "x": 176,
-     "y": 64,
-     "width": 160,
+     "x": 249,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 60,
-     "fontColor": "#d29922",
+     "fontSize": 68,
+     "fontColor": "#ffb300",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1361,15 +1435,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "GPU utilization (hot)",
      "label": "gpu_util_r",
-     "x": 176,
-     "y": 64,
-     "width": 160,
+     "x": 249,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 60,
-     "fontColor": "#f85149",
+     "fontSize": 68,
+     "fontColor": "#ff4136",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1386,44 +1460,17 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "CPU caption",
-     "label": "lbl_cpu_cap",
-     "x": 16,
-     "y": 146,
-     "width": 160,
+     "name": "die temperature caption",
+     "label": "lbl_temp",
+     "x": 485,
+     "y": 37,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 16,
-     "fontColor": "#8b949e",
-     "fontWeight": "normal",
-     "textAlign": "center",
-     "integerDigits": -1,
-     "decimalDigits": 0,
-     "unit": "",
-     "minAngle": 0,
-     "maxAngle": 180,
-     "minValue": 0,
-     "maxValue": 100,
-     "pic": "",
-     "xz_x": 0,
-     "xz_y": 0
-    },
-    {
-     "mode": 1,
-     "type": 1,
-     "name": "GPU caption",
-     "label": "lbl_gpu_cap",
-     "x": 176,
-     "y": 146,
-     "width": 160,
-     "height": 0,
-     "textDirection": 0,
-     "direction": 1,
-     "value": "",
-     "fontSize": 16,
-     "fontColor": "#8b949e",
+     "fontSize": 24,
+     "fontColor": "#b3bcc8",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1442,15 +1489,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "die temperature (ok)",
      "label": "cpu_temp_g",
-     "x": 16,
-     "y": 178,
-     "width": 320,
+     "x": 485,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 62,
-     "fontColor": "#3fb950",
+     "fontSize": 68,
+     "fontColor": "#2fe36a",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1469,15 +1516,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "die temperature (warn)",
      "label": "cpu_temp_a",
-     "x": 16,
-     "y": 178,
-     "width": 320,
+     "x": 485,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 62,
-     "fontColor": "#d29922",
+     "fontSize": 68,
+     "fontColor": "#ffb300",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1496,15 +1543,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "die temperature (hot)",
      "label": "cpu_temp_r",
-     "x": 16,
-     "y": 178,
-     "width": 320,
+     "x": 485,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 62,
-     "fontColor": "#f85149",
+     "fontSize": 68,
+     "fontColor": "#ff4136",
      "fontWeight": "normal",
      "textAlign": "center",
      "integerDigits": -1,
@@ -1521,19 +1568,19 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "RAM caption",
+     "name": "RAM usage caption",
      "label": "lbl_ram",
-     "x": 32,
-     "y": 266,
-     "width": 0,
+     "x": 721,
+     "y": 37,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 18,
-     "fontColor": "#8b949e",
+     "fontSize": 24,
+     "fontColor": "#b3bcc8",
      "fontWeight": "normal",
-     "textAlign": "left",
+     "textAlign": "center",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -1548,19 +1595,19 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "RAM usage",
-     "label": "mem_pct",
-     "x": 86,
-     "y": 266,
-     "width": 0,
+     "name": "RAM usage (ok)",
+     "label": "mem_pct_g",
+     "x": 721,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 18,
-     "fontColor": "#e6edf3",
+     "fontSize": 68,
+     "fontColor": "#2fe36a",
      "fontWeight": "normal",
-     "textAlign": "left",
+     "textAlign": "center",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -1575,19 +1622,19 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "NET header",
-     "label": "lbl_net",
-     "x": 368,
-     "y": 28,
-     "width": 0,
+     "name": "RAM usage (warn)",
+     "label": "mem_pct_a",
+     "x": 721,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 22,
-     "fontColor": "#8b949e",
+     "fontSize": 68,
+     "fontColor": "#ffb300",
      "fontWeight": "normal",
-     "textAlign": "left",
+     "textAlign": "center",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -1602,19 +1649,19 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "clock",
-     "label": "DATE_h_m_3",
-     "x": 352,
-     "y": 26,
-     "width": 576,
+     "name": "RAM usage (hot)",
+     "label": "mem_pct_r",
+     "x": 721,
+     "y": 93,
+     "width": 226,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 26,
-     "fontColor": "#8b949e",
+     "fontSize": 68,
+     "fontColor": "#ff4136",
      "fontWeight": "normal",
-     "textAlign": "right",
+     "textAlign": "center",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -1631,15 +1678,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "upload arrow",
      "label": "lbl_up",
-     "x": 372,
-     "y": 64,
+     "x": 30,
+     "y": 183,
      "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 32,
-     "fontColor": "#3fb950",
+     "fontSize": 34,
+     "fontColor": "#2fe36a",
      "fontWeight": "normal",
      "textAlign": "left",
      "integerDigits": -1,
@@ -1658,42 +1705,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "upload speed",
      "label": "net_up",
-     "x": 422,
-     "y": 56,
-     "width": 502,
-     "height": 0,
-     "textDirection": 0,
-     "direction": 1,
-     "value": "",
-     "fontSize": 44,
-     "fontColor": "#e6edf3",
-     "fontWeight": "normal",
-     "textAlign": "right",
-     "integerDigits": -1,
-     "decimalDigits": 0,
-     "unit": "",
-     "minAngle": 0,
-     "maxAngle": 180,
-     "minValue": 0,
-     "maxValue": 100,
-     "pic": "",
-     "xz_x": 0,
-     "xz_y": 0
-    },
-    {
-     "mode": 1,
-     "type": 1,
-     "name": "upload history",
-     "label": "net_up_graph",
-     "x": 372,
-     "y": 106,
+     "x": 72,
+     "y": 187,
      "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 26,
-     "fontColor": "#3fb950",
+     "fontSize": 40,
+     "fontColor": "#ffffff",
      "fontWeight": "normal",
      "textAlign": "left",
      "integerDigits": -1,
@@ -1710,17 +1730,71 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "upload peak",
-     "label": "net_up_peak",
-     "x": 352,
-     "y": 112,
-     "width": 576,
+     "name": "upload history",
+     "label": "net_up_graph",
+     "x": 290,
+     "y": 196,
+     "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 15,
-     "fontColor": "#8b949e",
+     "fontSize": 40,
+     "fontColor": "#2fe36a",
+     "fontWeight": "normal",
+     "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "upload peak caption",
+     "label": "lbl_peak",
+     "x": 780,
+     "y": 172,
+     "width": 150,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 20,
+     "fontColor": "#b3bcc8",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "upload peak",
+     "label": "net_up_peak",
+     "x": 780,
+     "y": 201,
+     "width": 150,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 24,
+     "fontColor": "#ffffff",
      "fontWeight": "normal",
      "textAlign": "right",
      "integerDigits": -1,
@@ -1739,15 +1813,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "download arrow",
      "label": "lbl_down",
-     "x": 372,
-     "y": 150,
+     "x": 30,
+     "y": 260,
      "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 32,
-     "fontColor": "#58a6ff",
+     "fontSize": 34,
+     "fontColor": "#4aa8ff",
      "fontWeight": "normal",
      "textAlign": "left",
      "integerDigits": -1,
@@ -1766,17 +1840,17 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "download speed",
      "label": "net_down",
-     "x": 422,
-     "y": 142,
-     "width": 502,
+     "x": 72,
+     "y": 264,
+     "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 44,
-     "fontColor": "#e6edf3",
+     "fontSize": 40,
+     "fontColor": "#ffffff",
      "fontWeight": "normal",
-     "textAlign": "right",
+     "textAlign": "left",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -1793,15 +1867,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "download history",
      "label": "net_down_graph",
-     "x": 372,
-     "y": 192,
+     "x": 290,
+     "y": 273,
      "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 26,
-     "fontColor": "#58a6ff",
+     "fontSize": 40,
+     "fontColor": "#4aa8ff",
      "fontWeight": "normal",
      "textAlign": "left",
      "integerDigits": -1,
@@ -1818,17 +1892,17 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "download peak",
-     "label": "net_down_peak",
-     "x": 352,
-     "y": 198,
-     "width": 576,
+     "name": "download peak caption",
+     "label": "lbl_peak",
+     "x": 780,
+     "y": 249,
+     "width": 150,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 15,
-     "fontColor": "#8b949e",
+     "fontSize": 20,
+     "fontColor": "#b3bcc8",
      "fontWeight": "normal",
      "textAlign": "right",
      "integerDigits": -1,
@@ -1845,71 +1919,17 @@ net_ip_address: network_@NETIF@_address0
     {
      "mode": 1,
      "type": 1,
-     "name": "IP caption",
-     "label": "lbl_ip",
-     "x": 372,
-     "y": 254,
-     "width": 0,
+     "name": "download peak",
+     "label": "net_down_peak",
+     "x": 780,
+     "y": 278,
+     "width": 150,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 18,
-     "fontColor": "#8b949e",
-     "fontWeight": "normal",
-     "textAlign": "left",
-     "integerDigits": -1,
-     "decimalDigits": 0,
-     "unit": "",
-     "minAngle": 0,
-     "maxAngle": 180,
-     "minValue": 0,
-     "maxValue": 100,
-     "pic": "",
-     "xz_x": 0,
-     "xz_y": 0
-    },
-    {
-     "mode": 1,
-     "type": 1,
-     "name": "IP address",
-     "label": "net_ip",
-     "x": 412,
-     "y": 252,
-     "width": 0,
-     "height": 0,
-     "textDirection": 0,
-     "direction": 1,
-     "value": "",
-     "fontSize": 20,
-     "fontColor": "#e6edf3",
-     "fontWeight": "normal",
-     "textAlign": "left",
-     "integerDigits": -1,
-     "decimalDigits": 0,
-     "unit": "",
-     "minAngle": 0,
-     "maxAngle": 180,
-     "minValue": 0,
-     "maxValue": 100,
-     "pic": "",
-     "xz_x": 0,
-     "xz_y": 0
-    },
-    {
-     "mode": 1,
-     "type": 1,
-     "name": "graph window caption",
-     "label": "lbl_window",
-     "x": 352,
-     "y": 256,
-     "width": 576,
-     "height": 0,
-     "textDirection": 0,
-     "direction": 1,
-     "value": "",
-     "fontSize": 16,
-     "fontColor": "#8b949e",
+     "fontSize": 24,
+     "fontColor": "#ffffff",
      "fontWeight": "normal",
      "textAlign": "right",
      "integerDigits": -1,
@@ -1928,15 +1948,15 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "disk summary",
      "label": "disk_ok",
-     "x": 32,
-     "y": 324,
+     "x": 30,
+     "y": 338,
      "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 20,
-     "fontColor": "#3fb950",
+     "fontSize": 24,
+     "fontColor": "#2fe36a",
      "fontWeight": "normal",
      "textAlign": "left",
      "integerDigits": -1,
@@ -1955,17 +1975,71 @@ net_ip_address: network_@NETIF@_address0
      "type": 1,
      "name": "disk alert",
      "label": "disk_alert",
-     "x": 32,
-     "y": 322,
+     "x": 30,
+     "y": 338,
      "width": 0,
      "height": 0,
      "textDirection": 0,
      "direction": 1,
      "value": "",
-     "fontSize": 22,
-     "fontColor": "#f85149",
+     "fontSize": 24,
+     "fontColor": "#ff4136",
      "fontWeight": "normal",
      "textAlign": "left",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "IP address / network problem",
+     "label": "net_ip",
+     "x": 593,
+     "y": 338,
+     "width": 245,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 24,
+     "fontColor": "#ffffff",
+     "fontWeight": "normal",
+     "textAlign": "right",
+     "integerDigits": -1,
+     "decimalDigits": 0,
+     "unit": "",
+     "minAngle": 0,
+     "maxAngle": 180,
+     "minValue": 0,
+     "maxValue": 100,
+     "pic": "",
+     "xz_x": 0,
+     "xz_y": 0
+    },
+    {
+     "mode": 1,
+     "type": 1,
+     "name": "clock",
+     "label": "DATE_h_m_3",
+     "x": 850,
+     "y": 338,
+     "width": 80,
+     "height": 0,
+     "textDirection": 0,
+     "direction": 1,
+     "value": "",
+     "fontSize": 24,
+     "fontColor": "#b3bcc8",
+     "fontWeight": "normal",
+     "textAlign": "right",
      "integerDigits": -1,
      "decimalDigits": 0,
      "unit": "",
@@ -2053,55 +2127,56 @@ DEALINGS IN THE SOFTWARE.
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/aoostar-lcd/panel/unraid-dark.png" Mode="0644" Type="base64">
-<SHA256>ae68196591540305bc9edce4a16de4ef3a2941b7117aace3d1ff76ce8942c834</SHA256>
+<SHA256>00680ab727519c868ab69ba025c8700010b1963e3ce7118e94b46ad82bf81864</SHA256>
 <INLINE>
-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
-QmCC
+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
+AABJRU5ErkJggg==
 </INLINE>
 </FILE>
 

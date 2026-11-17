@@ -43,10 +43,23 @@ temp="*"
 device="sdf"
 rotational="1"
 temp="43"
+type="Data"
+fsSize="1000"
+fsUsed="700"
+["disk2"]
+device="sdg"
+rotational="1"
+temp="*"
+type="Data"
+fsSize="3000"
+fsUsed="1540"
 ["cache"]
 device="nvme1n1"
 rotational="0"
 temp="39"
+type="Cache"
+fsSize="5000"
+fsUsed="5000"
 ["flash"]
 device="sda"
 temp="*"
@@ -121,7 +134,9 @@ keys_ok=$(grep -o '^[a-z_]*:' "$OUT" | sort | tr '\n' ' ')
 NETIF=eth3
 collect_once
 check "link down is reported"           "eth3 link down" "$(val net_ip)"
-check "no speed claimed when link down" "--"             "$(val net_up)"
+# "n/a", not dashes: asterctl positions a string by its tallest glyph, and
+# the "/" keeps the placeholder on the same baseline as "13.8 MB/s"
+check "no speed claimed when link down" "n/a"            "$(val net_up)"
 NETIF=eth9
 collect_once
 check "missing interface is reported"   "eth9 not found" "$(val net_ip)"
@@ -158,8 +173,8 @@ done
 check "history stays GRAPH_BUCKETS long (1440 min @ 1 s)" \
       "$GRAPH_BUCKETS $GRAPH_BUCKETS" "${#UP_B[@]} ${#DOWN_B[@]}"
 
-# bucket semantics: 26 buckets over 26 minutes = 60 s each
-GRAPH_MIN=26 REFRESH=3
+# bucket semantics: one minute of window per bucket = 60 s each
+GRAPH_MIN=$GRAPH_BUCKETS REFRESH=3
 hist_init
 NOW_CS=100000 ; hist_push 500 0
 NOW_CS=100300 ; hist_push 900 0        # same bucket: the peak is kept
@@ -187,17 +202,44 @@ check "25% of peak is mid-height (sqrt)" "3" "$(lvl 250000 1000000)"
 check "no traffic at all: flat baseline" "0" "$(lvl 0 0)"
 hist_init ; NOW_CS=0 ; hist_push 1000000 0
 sparkline UP_B
-check "sparkline is exactly GRAPH_BUCKETS glyphs" "$GRAPH_BUCKETS" "${#SPARK}"
+check "sparkline is the axis glyph + GRAPH_BUCKETS columns" \
+      "$(( GRAPH_BUCKETS + 1 ))" "${#SPARK}"
 check "newest bucket is the rightmost glyph" "█" "${SPARK: -1}"
+# asterctl positions a string by its tallest glyph: an idle (all-baseline)
+# sparkline rendered 0.7 x its font size lower than a busy one and landed on
+# the download speed below. The constant full-height axis glyph pins it.
+hist_init ; sparkline UP_B
+check "idle sparkline still leads with the full-height axis glyph" \
+      "▏" "${SPARK:0:1}"
 
 # --- disks -------------------------------------------------------------------
 HDD_HOT=45 SSD_HOT=60
 read_disks
-check "disk summary counts" "hdd=1/43 ssd=1/39 standby=1" \
+check "disk summary counts" "hdd=1/43 ssd=1/39 standby=2" \
       "hdd=$hdd_n/$hdd_max ssd=$ssd_n/$ssd_max standby=$standby"
+# array usage: data disks only (a full cache pool must not count), and a
+# standby disk's cached sizes are included: (700+1540)/(1000+3000) = 56%
+check "array usage sums data disks only" "2240/4000" "$arr_used/$arr_size"
 HDD_HOT=40 ; read_disks
 check "hot disk is listed" "disk1 43°C" "$hot_list"
-HDD_HOT=45
+# the alert shares the strip with the address and outranks it: with many hot
+# disks an unbounded list ran off the strip, so it is capped and counted
+HDD_HOT=1 SSD_HOT=1 ALERT_MAX=1 ; read_disks
+check "alert names ALERT_MAX disks and counts the rest" "disk1 43°C +1" "$hot_list"
+collect_once
+check "alert replaces the summary"  ""  "$(val disk_ok)"
+check "alert replaces the address"  ""  "$(val net_ip)"
+check "alert text" "⚠ HOT: disk1 43°C +1" "$(val disk_alert)"
+HDD_HOT=45 SSD_HOT=60 ALERT_MAX=3
+
+# --- captions ----------------------------------------------------------------
+GRAPH_MIN=60  ; collect_once ; check "window in minutes" "60 min peak" "$(val lbl_peak)"
+GRAPH_MIN=1440; collect_once ; check "long window in hours" "24 h peak" "$(val lbl_peak)"
+GRAPH_MIN=90  ; collect_once ; check "uneven window stays in minutes" "90 min peak" "$(val lbl_peak)"
+check "RAM is a threshold-colored slot" "53%" "$(val mem_pct_g)"
+MEM_WARN=50 ; collect_once
+check "RAM turns amber at MEM_WARN" "53% /" "$(val mem_pct_a) /$(val mem_pct_g)"
+MEM_WARN=80
 # older Unraid: no rotational= in disks.ini -> sysfs, read once and cached
 is_ssd sdx "" && r=ssd || r=hdd
 check "rotational falls back to sysfs" "ssd" "$r"
@@ -226,7 +268,7 @@ check "builtins-only cycle: speed"  "1.0 MB/s" "$(val net_down)"
 check "builtins-only cycle: cpu"    "23%"      "$(val cpu_util_g)"
 check "builtins-only cycle: temp"   "74°C"     "$(val cpu_temp_a)"
 check "builtins-only cycle: gpu"    "42%"      "$(val gpu_util_g)"
-check "builtins-only cycle: disks"  "HDD max 43°C   ·   SSD max 39°C   ·   1 standby" "$(val disk_ok)"
+check "builtins-only cycle: disks"  "HDD 43°C · SSD 39°C · 2 standby · Array 56%" "$(val disk_ok)"
 
 echo
 [ "$fail" = "0" ] && echo "all checks passed" || echo "SOME CHECKS FAILED"

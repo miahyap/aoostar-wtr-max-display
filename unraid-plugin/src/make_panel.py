@@ -8,29 +8,107 @@ in sync. All text is rendered by asterctl (DejaVuSans built-in); dynamic
 colors work via green/amber/red label "slots": the collector script writes
 each value under exactly one of the slot labels, and asterctl skips
 sensors whose label has no value.
+
+Text placement
+--------------
+asterctl does not treat a text sensor's `y` as its top edge. It draws the
+line box at
+
+    line_top = y - int(tallest_glyph_ink_height * 1.3333 / 2)
+
+(render_text() in aoostar-rs' render.rs), so where a string lands depends
+on the tallest glyph it happens to contain. The first version of this
+panel ignored that: text sat a size-dependent distance above its intended
+position (captions straddling zone borders), and a sparkline of only
+baseline glyphs dropped 0.7 x its font size into the row below.
+
+Everything here is therefore positioned by BASELINE, and each sensor
+declares the tallest glyph class its values contain (the TALL_* constants,
+measured with `asterctl --simulate`). The collector keeps that class
+stable for every value it writes - e.g. sparklines always start with a
+full-height axis glyph. src/test/test_panel.py renders the panel in the
+simulator and checks the result.
 """
 import json
+import os
+import re
 import struct
 import zlib
-import os
 
 W, H = 960, 376
+SRC = os.path.dirname(os.path.abspath(__file__))
+STATS_SH = os.path.join(SRC, 'plugin-root', 'scripts', 'unraid-stats.sh')
 
-# palette (GitHub-dark inspired)
-BG      = (11, 15, 20)
-ZONE    = (17, 23, 30)
-BORDER  = (38, 48, 65)
-GREEN   = '#3fb950'
-AMBER   = '#d29922'
-RED     = '#f85149'
-TEXT    = '#e6edf3'
-MUTED   = '#8b949e'
-BLUE    = '#58a6ff'
+# palette: pure black background and saturated colors. The panel's black
+# level is poor off-axis (dark greys read as blue) and its gamut is narrow
+# (GitHub-style muted green/red/amber read as teal/pink/cream), so status
+# colors need all the separation they can get.
+BG      = (0, 0, 0)
+ZONE    = (0, 0, 0)
+BORDER  = (56, 68, 92)
+GREEN   = '#2fe36a'
+AMBER   = '#ffb300'
+RED     = '#ff4136'
+TEXT    = '#ffffff'
+MUTED   = '#b3bcc8'
+BLUE    = '#4aa8ff'
+
+# smallest font used anywhere: below this the panel is unreadable from
+# across a room
+MIN_FONT = 20
 
 # zones: (x, y, w, h)
-CPU_ZONE  = (16, 16, 320, 280)
-NET_ZONE  = (352, 16, 592, 280)
-DISK_ZONE = (16, 312, 928, 48)
+TILE_W, TILE_H, TILE_GAP = 226, 128, 10
+TILE_X0, TILE_Y = 13, 12
+TILES = ('cpu', 'gpu', 'temp', 'ram')
+TILE_ZONES = {
+    name: (TILE_X0 + i * (TILE_W + TILE_GAP), TILE_Y, TILE_W, TILE_H)
+    for i, name in enumerate(TILES)
+}
+NET_ZONE  = (13, 150, 934, 154)
+DISK_ZONE = (13, 314, 934, 50)
+ZONES = dict(TILE_ZONES, net=NET_ZONE, disk=DISK_ZONE)
+
+# ---- asterctl text metrics (fractions of fontSize, measured in simulator) --
+# tallest-glyph ink height per class of content
+TALL_CAPS  = 0.725   # capitals only ("CPU")
+TALL_DIGIT = 0.775   # digits, %, lowercase with ascenders/descenders
+TALL_SLASH = 0.825   # anything containing "/" ("13.8 MB/s", "n/a")
+TALL_BLOCK = 1.2     # full-height block elements (sparkline axis glyph)
+BASELINE   = 0.908   # line top -> baseline
+CAP_TOP    = 0.19    # line top -> top of capitals/digits
+BLOCK_TOP  = -0.025  # line top -> top of a full block
+BLOCK_ADV  = 0.8     # horizontal advance of a block element
+
+# network zone geometry
+NET_ROW_H    = NET_ZONE[3] // 2
+ARROW_SIZE   = 34
+SPEED_SIZE   = 40
+SPEED_X      = 72
+SPARK_SIZE   = 40
+SPARK_X      = 290
+PEAK_X, PEAK_W = 780, 150
+PEAK_CAP_SIZE, PEAK_SIZE = 20, 24
+
+TILE_CAP_SIZE, TILE_VAL_SIZE = 24, 68
+STRIP_SIZE = 24
+
+
+def graph_buckets():
+    """GRAPH_BUCKETS lives in the collector (it builds the sparkline
+    string); read it from there so the layout check below and the script
+    can never disagree."""
+    with open(STATS_SH, encoding='utf-8') as f:
+        m = re.search(r'^GRAPH_BUCKETS=(\d+)', f.read(), re.M)
+    if not m:
+        raise SystemExit('GRAPH_BUCKETS not found in unraid-stats.sh')
+    return int(m.group(1))
+
+
+def spark_width(buckets):
+    # one leading axis glyph + one glyph per bucket
+    return int((buckets + 1) * BLOCK_ADV * SPARK_SIZE)
+
 
 # ---------------------------------------------------------------- background
 
@@ -49,12 +127,12 @@ def make_background(path):
                     return True
         return False
 
-    for zx, zy, zw, zh in (CPU_ZONE, NET_ZONE, DISK_ZONE):
+    for zx, zy, zw, zh in ZONES.values():
         r = 10
         for y in range(zy, zy + zh):
             for x in range(zx, zx + zw):
                 if in_round(x, y, zx, zy, zw, zh, r):
-                    edge = not in_round(x, y, zx + 1, zy + 1, zw - 2, zh - 2, r)
+                    edge = not in_round(x, y, zx + 2, zy + 2, zw - 4, zh - 4, r)
                     px[y][x] = BORDER if edge else ZONE
 
     raw = b''.join(
@@ -74,68 +152,105 @@ def make_background(path):
 
 # ------------------------------------------------------------------- sensors
 
-def text(label, x, y, size, color, align='left', width=0, unit='',
-         decimals=0, name=''):
+def sensor_y(baseline, size, tall):
+    """The `y` that makes asterctl put the text baseline at `baseline`,
+    for content whose tallest glyph class is `tall` (see module docstring)."""
+    line_top = baseline - BASELINE * size
+    return round(line_top) + int(tall * size * 1.3333 / 2)
+
+
+def text(label, x, baseline, size, color, tall, align='left', width=0,
+         name=''):
+    if size < MIN_FONT:
+        raise SystemExit(f'{label}: font size {size} is below MIN_FONT')
     return {
         'mode': 1, 'type': 1, 'name': name or label, 'label': label,
-        'x': x, 'y': y, 'width': width, 'height': 0,
+        'x': x, 'y': sensor_y(baseline, size, tall), 'width': width,
+        'height': 0,
         'textDirection': 0, 'direction': 1, 'value': '',
         'fontSize': size, 'fontColor': color, 'fontWeight': 'normal',
-        'textAlign': align, 'integerDigits': -1, 'decimalDigits': decimals,
-        'unit': unit, 'minAngle': 0, 'maxAngle': 180,
+        'textAlign': align, 'integerDigits': -1, 'decimalDigits': 0,
+        'unit': '', 'minAngle': 0, 'maxAngle': 180,
         'minValue': 0, 'maxValue': 100, 'pic': '', 'xz_x': 0, 'xz_y': 0,
     }
 
 
-def slots(label, x, y, size, align='left', width=0, unit='', decimals=0,
-          name=''):
+def slots(label, x, baseline, size, tall, align='left', width=0, name=''):
     """One text element per color slot; the collector writes all three each
     cycle with only one non-empty (units baked into the value), because
     asterctl's sensor map never drops absent keys - empty overwrites are
     what clears a stale slot."""
     return [
-        text(f'{label}_g', x, y, size, GREEN, align, width, unit, decimals, f'{name} (ok)'),
-        text(f'{label}_a', x, y, size, AMBER, align, width, unit, decimals, f'{name} (warn)'),
-        text(f'{label}_r', x, y, size, RED,   align, width, unit, decimals, f'{name} (hot)'),
+        text(f'{label}_g', x, baseline, size, GREEN, tall, align, width, f'{name} (ok)'),
+        text(f'{label}_a', x, baseline, size, AMBER, tall, align, width, f'{name} (warn)'),
+        text(f'{label}_r', x, baseline, size, RED,   tall, align, width, f'{name} (hot)'),
     ]
 
 
-def make_monitor(path):
-    cx, cy, cw, ch = CPU_ZONE
+def build_layout():
+    """[(zone name, sensor dict), ...] - the zone is what the simulator test
+    uses to check that each sensor's ink stays inside its box."""
+    out = []
+
+    def add(zone, *sensors):
+        out.extend((zone, s) for s in sensors)
+
+    # --- four stat tiles: caption on top, big threshold-colored value ---
+    tile_values = {
+        'cpu':  ('lbl_cpu',  'cpu_util', 'CPU utilization'),
+        'gpu':  ('lbl_gpu',  'gpu_util', 'GPU utilization'),
+        'temp': ('lbl_temp', 'cpu_temp', 'die temperature'),
+        'ram':  ('lbl_ram',  'mem_pct',  'RAM usage'),
+    }
+    for tile, (cap, val, name) in tile_values.items():
+        zx, zy, zw, zh = TILE_ZONES[tile]
+        add(tile, text(cap, zx, zy + 36, TILE_CAP_SIZE, MUTED, TALL_CAPS,
+                       'center', zw, f'{name} caption'))
+        add(tile, *slots(val, zx, zy + 108, TILE_VAL_SIZE, TALL_DIGIT,
+                         'center', zw, name))
+
+    # --- network: one row per direction - arrow, speed, history, peak ---
     nx, ny, nw, nh = NET_ZONE
+    buckets = graph_buckets()
+    if SPARK_X + spark_width(buckets) > PEAK_X - 8:
+        raise SystemExit(
+            f'sparkline ({buckets} buckets at size {SPARK_SIZE}) is '
+            f'{spark_width(buckets)}px wide and runs into the peak column')
+    rows = (('up', GREEN, 'upload'), ('down', BLUE, 'download'))
+    for r, (d, color, name) in enumerate(rows):
+        centre = ny + r * NET_ROW_H + NET_ROW_H // 2
+        add('net', text(f'lbl_{d}', nx + 17, centre + 9, ARROW_SIZE, color,
+                        TALL_DIGIT, name=f'{name} arrow'))
+        add('net', text(f'net_{d}', SPEED_X, centre + 14, SPEED_SIZE, TEXT,
+                        TALL_SLASH, name=f'{name} speed'))
+        # block glyphs span BLOCK_TOP .. BLOCK_TOP+TALL_BLOCK of the line
+        # box: centre them on the row
+        spark_top = centre - TALL_BLOCK * SPARK_SIZE / 2
+        spark_base = spark_top + (BASELINE - BLOCK_TOP) * SPARK_SIZE
+        add('net', text(f'net_{d}_graph', SPARK_X, spark_base, SPARK_SIZE,
+                        color, TALL_BLOCK, name=f'{name} history'))
+        add('net', text('lbl_peak', PEAK_X, centre - 8, PEAK_CAP_SIZE, MUTED,
+                        TALL_DIGIT, 'right', PEAK_W, f'{name} peak caption'))
+        add('net', text(f'net_{d}_peak', PEAK_X, centre + 22, PEAK_SIZE, TEXT,
+                        TALL_SLASH, 'right', PEAK_W, f'{name} peak'))
+
+    # --- bottom strip: disks on the left (summary OR alert - exactly one
+    # is non-empty at a time), address and clock on the right ---
     dx, dy, dw, dh = DISK_ZONE
+    base = dy + 34
+    add('disk', text('disk_ok', dx + 17, base, STRIP_SIZE, GREEN, TALL_DIGIT,
+                     name='disk summary'))
+    add('disk', text('disk_alert', dx + 17, base, STRIP_SIZE, RED, TALL_DIGIT,
+                     name='disk alert'))
+    add('disk', text('net_ip', dx + 580, base, STRIP_SIZE, TEXT, TALL_DIGIT,
+                     'right', 245, 'IP address / network problem'))
+    add('disk', text('DATE_h_m_3', dx + 837, base, STRIP_SIZE, MUTED,
+                     TALL_DIGIT, 'right', 80, 'clock'))
+    return out
 
-    half = cw // 2
-    sensors = []
-    # --- CPU/GPU zone: utilizations side by side, shared die temp below ---
-    sensors.append(text('lbl_cpu', cx + 16, cy + 12, 22, MUTED, name='zone header'))
-    sensors += slots('cpu_util', cx, cy + 48, 60, 'center', half, '', 0, 'CPU utilization')
-    sensors += slots('gpu_util', cx + half, cy + 48, 60, 'center', half, '', 0, 'GPU utilization')
-    sensors.append(text('lbl_cpu_cap', cx, cy + 130, 16, MUTED, 'center', half, name='CPU caption'))
-    sensors.append(text('lbl_gpu_cap', cx + half, cy + 130, 16, MUTED, 'center', half, name='GPU caption'))
-    sensors += slots('cpu_temp', cx, cy + 162, 62, 'center', cw, '', 0, 'die temperature')
-    sensors.append(text('lbl_ram', cx + 16, cy + 250, 18, MUTED, name='RAM caption'))
-    sensors.append(text('mem_pct', cx + 70, cy + 250, 18, TEXT, name='RAM usage'))
 
-    # --- NET zone: current speeds with history sparklines under each ---
-    sensors.append(text('lbl_net', nx + 16, ny + 12, 22, MUTED, name='NET header'))
-    sensors.append(text('DATE_h_m_3', nx, ny + 10, 26, MUTED, 'right', nw - 16, name='clock'))
-    sensors.append(text('lbl_up', nx + 20, ny + 48, 32, GREEN, name='upload arrow'))
-    sensors.append(text('net_up', nx + 70, ny + 40, 44, TEXT, 'right', nw - 90, name='upload speed'))
-    sensors.append(text('net_up_graph', nx + 20, ny + 90, 26, GREEN, name='upload history'))
-    sensors.append(text('net_up_peak', nx, ny + 96, 15, MUTED, 'right', nw - 16, name='upload peak'))
-    sensors.append(text('lbl_down', nx + 20, ny + 134, 32, BLUE, name='download arrow'))
-    sensors.append(text('net_down', nx + 70, ny + 126, 44, TEXT, 'right', nw - 90, name='download speed'))
-    sensors.append(text('net_down_graph', nx + 20, ny + 176, 26, BLUE, name='download history'))
-    sensors.append(text('net_down_peak', nx, ny + 182, 15, MUTED, 'right', nw - 16, name='download peak'))
-    sensors.append(text('lbl_ip', nx + 20, ny + 238, 18, MUTED, name='IP caption'))
-    sensors.append(text('net_ip', nx + 60, ny + 236, 20, TEXT, name='IP address'))
-    sensors.append(text('lbl_window', nx, ny + 240, 16, MUTED, 'right', nw - 16, name='graph window caption'))
-
-    # --- disk strip: exactly one of these is present at a time ---
-    sensors.append(text('disk_ok', dx + 16, dy + 12, 20, GREEN, name='disk summary'))
-    sensors.append(text('disk_alert', dx + 16, dy + 10, 22, RED, name='disk alert'))
-
+def make_monitor(path):
+    sensors = [s for _, s in build_layout()]
     cfg = {
         'setup': {'switchTime': '30', 'refresh': 1},
         'mianban': [1],
@@ -152,7 +267,7 @@ def make_monitor(path):
 
 
 if __name__ == '__main__':
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plugin-root', 'panel')
+    out = os.path.join(SRC, 'plugin-root', 'panel')
     os.makedirs(out, exist_ok=True)
     make_background(os.path.join(out, 'unraid-dark.png'))
     make_monitor(os.path.join(out, 'monitor.json'))
