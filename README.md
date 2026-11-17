@@ -38,7 +38,8 @@ the download fails, the settings page will say so; copy a release tarball to
 `/boot/config/plugins/aoostar-lcd/packages/` by hand and click **Start**.
 
 Because the plg carries a `pluginURL`, Unraid's Plugins page will also show
-updates for it and can self-update from the same URL.
+updates for it and can self-update from the same URL. An update restarts the
+display service, so the new version takes effect straight away.
 
 ## Quick start (SSH / fully offline)
 
