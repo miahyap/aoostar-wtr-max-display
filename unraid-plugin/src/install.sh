@@ -10,7 +10,7 @@ mkdir -p "$FLASH/packages"
 if [ ! -f "$CFG" ]; then
   cat > "$CFG" <<'CFGEOF'
 SERVICE="enabled"
-NETIF="br0"
+NETIF="auto"
 REFRESH="3"
 DISKREFRESH="1800"
 SMARTCTL="no"
