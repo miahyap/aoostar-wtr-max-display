@@ -15,7 +15,7 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.11.17'
+VERSION = '2026.11.17a'
 
 # Unraid's Plugins page uses pluginURL to check for and install updates to an
 # already-installed plugin. Without it the plugin can only ever be updated by
@@ -95,6 +95,18 @@ def main():
                  f'support="{SUPPORT_URL}">\n\n')
     parts.append(f'''<CHANGES>
 ###{VERSION}
+- Redesigned panel for legibility on the real display: CPU, GPU,
+  temperature and RAM as four large tiles; each network speed next to its
+  arrow with its history graph and peak; a bottom strip with disk
+  temperatures, array usage, IP address and clock. Pure black background,
+  saturated colors, no text below 20 px.
+- Fixed text placement: captions no longer straddle zone borders and an
+  idle network graph no longer drops onto the row below.
+- RAM is now colored by threshold; the disk alert names up to three disks.
+- Note: a hand-customized monitor.json keeps working only for labels that
+  still exist - several panel labels changed with this redesign.
+
+###2026.11.17
 - Network speeds now come from the kernel's own counters, so bridges and
   bonds (br0, bond0) work; the interface defaults to "auto" (the default
   route's interface). An unplugged or missing interface is named on the

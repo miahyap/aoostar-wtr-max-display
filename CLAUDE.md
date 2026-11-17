@@ -21,9 +21,12 @@ half done.
 3. **Use the layers this repo already has.** `src/build.py` refuses invalid
    payloads; the plg simulator (XML parse + SHA256 + base64 round-trip),
    `bash -n` on every script, `xmllint --noent`, and Docker containers
-   (`bash:5.2` for collector behaviour, `php:8.2-cli`/`php:7.4-cli` for the
-   exact Unraid parse) all run on the Mac with no hardware. Only on-display
-   layout needs the real device.
+   (`bash:5.2` for collector behaviour — `src/test/test_stats.sh`,
+   `test_cron.sh`; `php:8.2-cli`/`php:7.4-cli` for the exact Unraid parse;
+   `debian:bookworm-slim` running asterctl's own `--simulate --save`
+   renderer for panel layout — `src/test/test_panel.py`) all run on the Mac
+   with no hardware. Text position, overlap and overflow ARE testable this
+   way; only colour and legibility need the real device.
 4. **Make the invariant testable.** If the buggy value was inline, lift it
    into a named constant or function (in `build.py`/`make_panel.py`/the shell
    scripts) so a check can assert on it and the call site stays the single
@@ -56,10 +59,19 @@ Everything the plugin ships is **generated** — never hand-edit build outputs.
   `unraid-stats.sh`. Every label must be rewritten every cycle (empty value =
   render nothing): asterctl's sensor map never drops absent keys, so relying
   on key absence causes stale overlaps.
+- Text position depends on content: asterctl offsets a string by two thirds
+  of its **tallest glyph's** ink height. Place sensors with `text()`'s
+  baseline + `TALL_*` class in `make_panel.py`, never a raw `y`, and keep the
+  glyph class of every value the collector writes stable (sparklines lead
+  with `SPARK_AXIS`; placeholders are `n/a`, not dashes). A new or changed
+  sensor needs its widest value added to the scenarios in `test_panel.py`.
 
 Rebuild + validate after any source change:
 `python3 src/make_panel.py && python3 src/build.py && xmllint --noent --noout
-aoostar-lcd.plg` plus `bash -n` on changed scripts.
+aoostar-lcd.plg` plus `bash -n` on changed scripts, then the tests:
+`docker run --rm -v "$PWD":/w -w /w bash:5.2 bash unraid-plugin/src/test/test_stats.sh`
+(same for `test_cron.sh`) and `python3 unraid-plugin/src/test/test_panel.py`
+after any panel or collector-output change.
 
 ## Git commits — split by logical concern
 
