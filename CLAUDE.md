@@ -70,7 +70,7 @@ Rebuild + validate after any source change:
 `python3 src/make_panel.py && python3 src/build.py && xmllint --noent --noout
 aoostar-lcd.plg` plus `bash -n` on changed scripts, then the tests:
 `docker run --rm -v "$PWD":/w -w /w bash:5.2 bash unraid-plugin/src/test/test_stats.sh`
-(same for `test_cron.sh`) and `python3 unraid-plugin/src/test/test_panel.py`
+(same for `test_cron.sh`, `test_upgrade.sh`) and `python3 unraid-plugin/src/test/test_panel.py`
 after any panel or collector-output change.
 
 ## Git commits — split by logical concern
