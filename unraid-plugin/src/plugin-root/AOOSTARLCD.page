@@ -7,7 +7,7 @@ Markdown="true"
 /* AOOSTAR WTR MAX / GEM12+ PRO integrated display - plugin settings page */
 $alcd_defaults = [
   'SERVICE'       => 'enabled',
-  'NETIF'         => 'br0',
+  'NETIF'         => 'auto',
   'REFRESH'       => '3',
   'DISKREFRESH'   => '1800',
   'SMARTCTL'      => 'no',
@@ -52,7 +52,7 @@ foreach ($alcd_addr_lines as $line) {
     $alcd_ifaces[$parts[1]] = explode('/', $parts[3])[0];
   }
 }
-if (!array_key_exists($alcd_cfg['NETIF'], $alcd_ifaces)) {
+if ($alcd_cfg['NETIF'] !== 'auto' && !array_key_exists($alcd_cfg['NETIF'], $alcd_ifaces)) {
   $alcd_ifaces[$alcd_cfg['NETIF']] = '';
 }
 ksort($alcd_ifaces);
@@ -116,6 +116,7 @@ Turn the display off and back on automatically each day:
 
 Network interface shown on the display:
 : <select name="NETIF">
+  <option value="auto" <?=$alcd_cfg['NETIF']=='auto'?'selected':''?>>auto (interface of the default route)</option>
 <?foreach ($alcd_ifaces as $if => $ip):?>
   <option value="<?=htmlspecialchars($if)?>" <?=$alcd_cfg['NETIF']==$if?'selected':''?>><?=htmlspecialchars($if.($ip ? " ($ip)" : ''))?></option>
 <?endforeach;?>
@@ -155,6 +156,7 @@ SSD/NVMe temperature alert threshold (&deg;C):
 **Notes**
 
 * The **daily on/off schedule** turns the panel off at the *off* time and back on at the *on* time (24-hour clock, server local time). While off, the driver is fully stopped to release the display, so the status above reads *Stopped* during the off window - this is expected. A manual *Start* wakes it early; the next scheduled off-time still applies. The schedule only runs when *Start automatically at boot* is set to Yes.
+* **Network interface**: *auto* follows the default route (`br0` on a stock Unraid). If the chosen interface is unplugged or missing, the panel says so (e.g. `eth3 link down`) instead of showing `0 B/s`.
 * The bundled **Unraid Dark** panel shows CPU/GPU utilization and die temperature (green/amber/red by the thresholds above), network up/down speeds + IP, RAM, a clock, and a disk strip along the bottom: a green max-temperature summary normally, switching to a red alert listing any disk at/over its threshold. Disk temperatures come from Unraid itself, so spun-down disks are never woken.
 * Panel layout lives in `/boot/config/plugins/aoostar-lcd/cfg/monitor.json` (AOOSTAR-X theme format, incl. background images) — edit it and restart the driver to change what the display shows. If you customize it, the plugin stops touching it; delete it to get the stock panel back on next start.
 * Sensor name mapping: `/boot/config/plugins/aoostar-lcd/cfg/sensor-mapping.cfg`. It is auto-generated from your settings; delete its first line to manage it manually (use *Show available sensors* to see what your hardware provides).

@@ -15,7 +15,7 @@ OUT = os.path.join(os.path.dirname(SRC), 'aoostar-lcd.plg')
 ROOT = os.path.join(SRC, 'plugin-root')
 DEST = '/usr/local/emhttp/plugins/aoostar-lcd'
 
-VERSION = '2026.07.21'
+VERSION = '2026.11.17'
 
 # Unraid's Plugins page uses pluginURL to check for and install updates to an
 # already-installed plugin. Without it the plugin can only ever be updated by
@@ -95,6 +95,16 @@ def main():
                  f'support="{SUPPORT_URL}">\n\n')
     parts.append(f'''<CHANGES>
 ###{VERSION}
+- Network speeds now come from the kernel's own counters, so bridges and
+  bonds (br0, bond0) work; the interface defaults to "auto" (the default
+  route's interface). An unplugged or missing interface is named on the
+  panel instead of showing "0 B/s".
+- History sparklines use a square-root scale so light traffic stays
+  visible next to a burst; speeds are shown as e.g. "13.8 MB/s".
+- The collector's cost per cycle no longer grows with the graph window,
+  and its loop no longer forks awk/cat.
+
+###2026.07.21
 - Add an optional daily on/off schedule: turn the display off and back
   on at configured times each day (cron drives the rc script's new
   sleep/wake verbs). Configured on the settings page.

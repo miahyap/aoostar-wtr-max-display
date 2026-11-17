@@ -63,8 +63,9 @@ to step 3 below once it finishes.
    The display should light up with the default sensor panel within a few
    seconds.
 
-3. Open **Settings → Utilities → AOOSTAR LCD** and set the network
-   interface you want shown (default `br0`), then *Apply*.
+3. Optional: open **Settings → Utilities → AOOSTAR LCD** to pick the
+   network interface shown (default `auto` = the interface of the default
+   route, `br0` on a stock Unraid), then *Apply*.
 
 4. Optional: install the **IT87 Driver** plugin (by ich777) from the Apps
    tab for fan-RPM / extra motherboard sensors.
@@ -117,17 +118,31 @@ of the vendor theme:
   triple label "slots" — `unraid-stats.sh` writes each value under exactly
   one of `_g`/`_a`/`_r` and asterctl skips labels with no value)
 - **Network** current up/down speeds, IP address, a clock, and per-direction
-  **history sparklines** (block-element graphs auto-scaled to the window
-  peak, window length configurable, default 15 min)
+  **history sparklines** (block-element graphs on a square-root scale
+  relative to the window peak, so light traffic stays visible next to a
+  burst; window length configurable, default 15 min). Speeds are read from
+  the kernel's own counters in `/sys/class/net`, because aster-sysinfo only
+  reports physical NICs — not `br0`/`bond0`. A missing or unplugged
+  interface is named on the panel (`eth3 link down`) instead of showing a
+  misleading `0 B/s`.
 - **RAM** usage
 - **Disk strip**: green max-temperature summary (HDD / SSD split, standby
   count); switches to a red alert listing any disk at/over its threshold.
   Temperatures come from Unraid's own `disks.ini`, so spun-down disks are
   never woken.
 
-`unraid-stats.sh` was tested against mock data in a Linux container
-(threshold colors, alert/summary switching, standby/flash handling, and
-sparkline generation against ramping traffic). Note: asterctl's sensor
+`unraid-stats.sh` is covered by `src/test/test_stats.sh`, which runs it
+against mock `/sys`, `/proc` and `disks.ini` trees in a Linux container
+(interface selection, rates from counter deltas, dead-interface reporting,
+history bucketing, sparkline scale, disk summary):
+
+```sh
+docker run --rm -v "$PWD":/w -w /w bash:5.2 bash unraid-plugin/src/test/test_stats.sh
+```
+
+The collector folds network samples into a fixed number of time buckets as
+they arrive, so its cost per cycle does not grow with the graph window, and
+its loop uses bash builtins only (no `awk`/`cat` forks). Note: asterctl's sensor
 map never drops keys, so the collector rewrites every label each cycle
 (empty = render nothing) - relying on absent keys causes stale overlaps.
 The panel has been confirmed rendering correctly on a real WTR MAX display

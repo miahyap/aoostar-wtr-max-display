@@ -28,7 +28,7 @@ GITHUB_RELEASE="https://api.github.com/repos/zehnm/aoostar-rs/releases/tags/late
 
 # defaults (overridden by settings saved from the plugin page)
 SERVICE="enabled"
-NETIF="br0"
+NETIF="auto"
 REFRESH="3"
 DISKREFRESH="1800"
 SMARTCTL="no"
@@ -186,7 +186,14 @@ write_mapping() {
     return 0
   fi
   [ -f "$tpl" ] || return 0
-  sed "s/@NETIF@/$NETIF/g" "$tpl" > "$map"
+  # the mapping needs a concrete interface name: resolve "auto" the same way
+  # the collector does (the IPv4 default route's interface)
+  local netif="$NETIF"
+  if [ "$netif" = "auto" ]; then
+    netif=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+    [ -z "$netif" ] && netif="br0"
+  fi
+  sed "s/@NETIF@/$netif/g" "$tpl" > "$map"
 }
 
 parse_hhmm() {
